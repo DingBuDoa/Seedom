@@ -1,7 +1,7 @@
 {
-  "application_name": "PointStudio",
-  "application_version": "1.0.1",
-  "application_build_date": "2026-10-24",
+  "application_name": "SeedomVFX",
+  "application_version": "1.1.0",
+  "application_build_date": "2026-10-31",
   "created": "2026-10-18T11:36:20",
   "python": "3.13.11",
   "packages": {

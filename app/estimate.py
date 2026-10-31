@@ -29,6 +29,7 @@ def save_sample(result):
                     'hardware_key': result.get('hardware', {}).get('fingerprint'),
                     'settings': result.get('estimate_settings'),
                     'workload': result.get('workload'),
+                    'phase_seconds': result.get('phase_seconds', {}),
                     'gpu_solver_active': result.get('gpu_solver_active')})
     atomic_write_json(HISTORY, samples[-80:])
 
@@ -68,33 +69,42 @@ def duration_text(seconds):
     return f'{max(5, math.ceil(seconds/5)*5)} 秒'
 
 
+def prediction_range(workload, options, hardware, samples=None):
+    """Structured task duration, shared by queue previews and live countdowns."""
+    backend = 'fastmap' if options.backend == 'fastmap' else ('glomap-gpu' if options.glomap_gpu else 'glomap-cpu')
+    settings = settings_signature(options)
+    samples = read_samples() if samples is None else samples
+    matching = [sample for sample in samples if comparable(
+        sample, backend, hardware.get('fingerprint'), settings, workload)][-5:]
+    if not matching:
+        return None
+    predictions = [sample['seconds'] * workload['frames'] / sample['frames'] for sample in matching]
+    median = statistics.median(predictions)
+    low, high = (.5, 2.0) if len(matching) < 3 else (.7, 1.5)
+    return dict(lower=min(median * low, min(predictions) * .8),
+                upper=max(median * high, max(predictions) * 1.2), samples=len(matching))
+
+
 def estimate_jobs(jobs, options):
     if not jobs:
         return '预估任务时长：添加视频后自动估算'
     hardware = get_hardware(options.python)
     if not hardware.get('fingerprint'):
         return '预估任务时长：暂不可用（硬件检测未完成或失败）'
-    if not hardware.get('cuda_usable'):
+    if not hardware.get('cuda_usable') and (options.backend == 'fastmap' or options.glomap_gpu):
         return '预估任务时长：暂不可用（CUDA 实算未通过，请检查运行环境）'
     samples = read_samples()
-    backend = 'fastmap' if options.backend == 'fastmap' else ('glomap-gpu' if options.glomap_gpu else 'glomap-cpu')
-    settings = settings_signature(options)
     lower, upper, unknown, unreadable, least_samples = 0.0, 0.0, 0, 0, 5
     for job in jobs:
         try:
-            workload = describe_workload(job['path'], options, job['scene'])
-            matching = [sample for sample in samples
-                        if comparable(sample, backend, hardware['fingerprint'], settings, workload)][-5:]
-            if not matching:
+            workload = describe_workload(job['path'], options, job['scene'], job.get('project_dir'))
+            prediction = prediction_range(workload, options, hardware, samples)
+            if not prediction:
                 unknown += 1
                 continue
-            least_samples = min(least_samples, len(matching))
-            predictions = [sample['seconds'] * workload['frames'] / sample['frames'] for sample in matching]
-            median = statistics.median(predictions)
-            # Heuristic band; this is not a statistical confidence interval.
-            low_factor, high_factor = (0.5, 2.0) if len(matching) < 3 else (0.7, 1.5)
-            lower += min(median * low_factor, min(predictions) * 0.8)
-            upper += max(median * high_factor, max(predictions) * 1.2)
+            least_samples = min(least_samples, prediction['samples'])
+            lower += prediction['lower']
+            upper += prediction['upper']
         except Exception:
             unreadable += 1
     notes = []
@@ -106,6 +116,6 @@ def estimate_jobs(jobs, options):
     if unreadable:
         notes.append(f'{unreadable} 项无法读取素材信息')
     if not lower:
-        return '预估任务时长：暂不可用（' + '；'.join(notes) + '）'
+        return '总时长尚未校准；运行后按实际进度估算当前阶段（' + '；'.join(notes) + '）'
     qualifier = '可估部分约' if unknown or unreadable else '约'
     return f'预估任务时长：{qualifier} {duration_text(lower)}–{duration_text(upper)}（' + '；'.join(notes) + '）'

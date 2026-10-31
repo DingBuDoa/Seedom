@@ -4,7 +4,7 @@ from pathlib import Path
 import queue
 import threading
 
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QCheckBox, QFormLayout, QGroupBox, QScrollArea, QWidget,
     QDoubleSpinBox, QSpinBox, QPlainTextEdit, QFileDialog)
@@ -14,6 +14,7 @@ from workload import video_info
 from blender_runtime import discover_blenders, probe_blender
 from qt_style import inset_numeric_fields
 from app_info import SOLVER_CHOICES
+from solver_quality import SOLVER_PROFILES, quality_note
 
 
 def label(text, name='muted'):
@@ -60,13 +61,18 @@ class VideoInput(QPlainTextEdit):
 
 
 class TaskDialog(QDialog):
-    def __init__(self, parent, options, job=None, paths=None):
+    def __init__(self, parent, options, job=None, paths=None, blender_records=None, blender_settings=None,
+                 name_validator=None):
         super().__init__(parent)
         self.setWindowTitle('编辑任务' if job else '添加任务')
         self.resize(680, 760)
-        self.setMinimumSize(590, 540)
+        self.setMinimumSize(520, 480)
         self.result_data = None
         self.job = job
+        self.name_validator = name_validator
+        self.blender_records = list(blender_records or [])
+        self.blender_settings = dict(blender_settings or {})
+        self.blender_scan_pending = queue.Queue()
         self.base = options
         self.metadata = {}
         self.pending = queue.Queue()
@@ -82,6 +88,7 @@ class TaskDialog(QDialog):
         root.addWidget(head)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         body = QWidget()
         layout = QVBoxLayout(body)
         layout.setContentsMargins(24, 0, 24, 16)
@@ -120,11 +127,12 @@ class TaskDialog(QDialog):
         self.backend.setCurrentIndex(0 if options.backend == 'fastmap' else 1)
         form.addRow('求解方案', self.backend)
         self.quality = QComboBox()
-        # Presets expose exact existing parameters; no synthetic solver accuracy switch.
-        for title, values in [('默认 · 沿用当前参数', None), ('高 · SIFT 4096 / 匹配 15', (4096, 15)),
-                              ('中 · SIFT 2048 / 匹配 10', (2048, 10)), ('低 · SIFT 1024 / 匹配 5', (1024, 5))]:
+        for title, values in [('默认 · 沿用当前参数', None), ('高 · SIFT 4096 / 匹配 15', (4096, 15, 'high')),
+                              ('中 · SIFT 2048 / 匹配 10', (2048, 10, 'balanced')), ('低 · SIFT 1024 / 匹配 5', (1024, 5, 'fast'))]:
             self.quality.addItem(title, values)
-        form.addRow('处理精度', self.quality)
+        form.addRow('计算精度', self.quality)
+        self.quality_note = label(quality_note(options.solver_quality))
+        form.addRow('', self.quality_note)
         self.rate = QComboBox()
         for title, value in [('默认 · 原始帧率', 0), ('30 帧 / 秒', 30), ('60 帧 / 秒', 60), ('自定义', -1)]:
             self.rate.addItem(title, value)
@@ -164,6 +172,49 @@ class TaskDialog(QDialog):
         self.blend = QCheckBox('计算完成后生成 Blender 文件')
         self.blend.setChecked(bool(job and job.get('blender')))
         form.addRow(self.blend)
+        self.blender_group = QGroupBox('Blender 导出设置（首次启动会自动缓存版本）')
+        blender_form = QFormLayout(self.blender_group)
+        self.blender_note = label(f'检测到 {len(self.blender_records)} 个 Blender 版本。' if self.blender_records else '正在检测本机 Blender；完成后会显示版本列表。')
+        blender_form.addRow('', self.blender_note)
+        self.blender_version = QComboBox()
+        for record in self.blender_records:
+            self.blender_version.addItem(f"{record['version']}  |  {record['path']}", record)
+        self.current_blender = (job or {}).get('blender') or {}
+        preferred = self.current_blender.get('path') or self.blender_settings.get('blender_path')
+        preferred_index = next((i for i, record in enumerate(self.blender_records)
+                                if record['path'].casefold() == str(preferred or '').casefold()), -1)
+        if preferred_index >= 0: self.blender_version.setCurrentIndex(preferred_index)
+        elif self.blender_records: self.blender_version.setCurrentIndex(0)
+        blender_form.addRow('Blender 版本', self.blender_version)
+        self.blender_add = button('添加版本…', self.add_blender)
+        blender_form.addRow('', self.blender_add)
+        from blender_export import default_point_radius
+        defaults = self.blender_settings
+        self.points = QCheckBox('显示彩色点（工程内保存颜色，无需额外安装插件）')
+        self.points.setChecked(bool(self.current_blender.get('draw_points', defaults.get('blender_draw_points', True))))
+        self.mesh = QCheckBox('同时生成可编辑网格（用于几何节点及渲染）')
+        self.mesh.setChecked(bool(self.current_blender.get('as_mesh', defaults.get('blender_as_mesh', True))))
+        self.background = QCheckBox('预览和渲染使用抽帧背景')
+        self.background.setChecked(bool(self.current_blender.get('background_images', defaults.get('blender_background_images', True))))
+        self.warnings = QCheckBox('隐藏镜头畸变警告')
+        self.warnings.setChecked(bool(self.current_blender.get('suppress_warnings', defaults.get('blender_suppress_warnings', True))))
+        for field in (self.points, self.mesh, self.background, self.warnings): blender_form.addRow(field)
+        self.radius = QDoubleSpinBox(); self.radius.setDecimals(4); self.radius.setRange(.0001, 100)
+        self.radius.setValue(default_point_radius({'blender_point_radius': self.current_blender.get(
+            'point_radius', defaults.get('blender_point_radius', .005)),
+            'blender_point_size_revision': defaults.get('blender_point_size_revision', 0)}))
+        blender_form.addRow('网格渲染点半径', self.radius)
+        self.blender_fps = QDoubleSpinBox(); self.blender_fps.setDecimals(3); self.blender_fps.setRange(.01, 240)
+        self.blender_fps.setValue(float(self.current_blender.get('fps', defaults.get('blender_fps', 30))))
+        blender_form.addRow('Blender FPS', self.blender_fps)
+        self.frame_start_offset = QSpinBox(); self.frame_start_offset.setRange(0, 10000)
+        self.frame_start_offset.setValue(int(self.current_blender.get(
+            'frame_start_offset', defaults.get('blender_frame_start_offset', 0))))
+        self.frame_start_offset.setSuffix(' 帧')
+        blender_form.addRow('导出起始帧偏移（前置空帧）', self.frame_start_offset)
+        blender_form.addRow(label('0 = 从第 1 帧开始；设置 30 时，相机轨迹与背景合成从第 31 帧开始。'))
+        self.blender_group.setVisible(self.blend.isChecked())
+        form.addRow(self.blender_group)
         form.addRow(label('项目文件夹以任务名命名；点云在 point could，日志在 log，可选序列帧在 video。\nBlender 文件直接放在项目文件夹，名称含版本号；必要的求解缓存统一存入 _cache。'))
         layout.addWidget(output)
         self.advanced_toggle = QPushButton('›  高级参数')
@@ -180,6 +231,11 @@ class TaskDialog(QDialog):
         self.decode = QCheckBox('CUDA 视频解码（失败时沿用 CPU 解码回退）'); self.decode.setChecked(options.cuda_decode)
         self.color = QCheckBox('FastMap 点云取色'); self.color.setChecked(options.color)
         self.gpu = QCheckBox('GLOMAP 使用 CUDA / cuDSS 求解'); self.gpu.setChecked(options.glomap_gpu)
+        self.solver_quality = QComboBox()
+        for key, profile in SOLVER_PROFILES.items(): self.solver_quality.addItem(profile['title'], key)
+        self.solver_quality.setCurrentIndex(self.solver_quality.findData(options.solver_quality))
+        self.solver_quality.currentIndexChanged.connect(lambda: self.quality_note.setText(quality_note(self.solver_quality.currentData())))
+        form.addRow('FastMap 优化档位', self.solver_quality)
         for name, field in [('SIFT 最大尺寸', self.max_size), ('相邻匹配范围', self.overlap), ('GPU 最少图像', self.gpu_min), ('相机模型', self.camera)]:
             form.addRow(name, field)
         for field in (self.decode, self.color, self.gpu):
@@ -193,6 +249,7 @@ class TaskDialog(QDialog):
         self.scale.currentIndexChanged.connect(self.update_controls)
         self.backend.currentIndexChanged.connect(self.update_controls)
         self.sequence.toggled.connect(self.update_controls)
+        self.blend.toggled.connect(self.blender_group.setVisible)
         foot = QWidget()
         fl = QVBoxLayout(foot)
         fl.setContentsMargins(24, 10, 24, 16)
@@ -206,6 +263,28 @@ class TaskDialog(QDialog):
         fl.addLayout(row); root.addWidget(foot)
         self.debounce = QTimer(self); self.debounce.setSingleShot(True); self.debounce.setInterval(350)
         self.debounce.timeout.connect(self.probe)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        screen = self.screen()
+        if screen is None:
+            return
+        available = screen.availableGeometry().adjusted(16, 16, -16, -16)
+        width = min(680, available.width())
+        height = min(760, available.height())
+        self.setMinimumSize(min(520, width), min(480, height))
+        self.resize(width, height)
+        parent = self.parentWidget()
+        if parent and parent.isVisible():
+            parent_area = parent.frameGeometry().intersected(available)
+            center = parent_area.center() if not parent_area.isEmpty() else available.center()
+        else:
+            center = available.center()
+        x = center.x() - self.width() // 2
+        y = center.y() - self.height() // 2
+        x = min(max(x, available.left()), available.right() - self.width() + 1)
+        y = min(max(y, available.top()), available.bottom() - self.height() + 1)
+        self.move(x, y)
         self.source.textChanged.connect(lambda: self.debounce.start())
         self.poller = QTimer(self); self.poller.setInterval(100); self.poller.timeout.connect(self.receive); self.poller.start()
         self.update_controls()
@@ -240,6 +319,28 @@ class TaskDialog(QDialog):
         if path:
             self.output.setText(path)
 
+    def add_blender(self):
+        path, _ = QFileDialog.getOpenFileName(self, '选择 Blender', '', 'Blender (blender.exe)')
+        if not path: return
+        self.blender_add.setEnabled(False)
+        self.blender_note.setText('正在验证 Blender 版本…')
+        def work():
+            try: self.blender_scan_pending.put(probe_blender(path))
+            except Exception as error: self.blender_scan_pending.put(error)
+        threading.Thread(target=work, daemon=True).start()
+
+    def set_blender_records(self, records):
+        preferred = (self.blender_version.currentData() or {}).get('path') or self.current_blender.get('path')
+        self.blender_records[:] = records
+        self.blender_version.clear()
+        for record in self.blender_records:
+            self.blender_version.addItem(f"{record['version']}  |  {record['path']}", record)
+        index = next((i for i, record in enumerate(self.blender_records)
+                      if record['path'].casefold() == str(preferred or '').casefold()), 0 if self.blender_records else -1)
+        self.blender_version.setCurrentIndex(index)
+        self.blender_note.setText(f'检测到 {len(self.blender_records)} 个 Blender 版本。' if self.blender_records
+                                  else '没有检测到 Blender，请检查安装位置或添加 blender.exe。')
+
     def probe(self):
         self.generation += 1
         generation = self.generation
@@ -261,6 +362,20 @@ class TaskDialog(QDialog):
         threading.Thread(target=work, daemon=True).start()
 
     def receive(self):
+        try:
+            blender_result = self.blender_scan_pending.get_nowait()
+        except queue.Empty:
+            blender_result = None
+        if blender_result is not None:
+            self.blender_add.setEnabled(True)
+            if isinstance(blender_result, Exception):
+                self.blender_note.setText('无法使用所选 Blender：' + str(blender_result))
+            else:
+                self.blender_records = [r for r in self.blender_records
+                                        if r['path'].casefold() != blender_result['path'].casefold()]
+                self.blender_records.append(blender_result)
+                self.set_blender_records(self.blender_records)
+                self.blender_version.setCurrentIndex(self.blender_version.count() - 1)
         while not self.pending.empty():
             generation, infos, error = self.pending.get_nowait()
             if generation != self.generation:
@@ -281,6 +396,7 @@ class TaskDialog(QDialog):
         values = self.quality.currentData()
         if values:
             self.max_size.setValue(values[0]); self.overlap.setValue(values[1])
+            self.solver_quality.setCurrentIndex(self.solver_quality.findData(values[2]))
 
     def update_controls(self, *_):
         self.custom_rate.setVisible(self.rate.currentData() == -1)
@@ -295,6 +411,7 @@ class TaskDialog(QDialog):
         self.gpu.setEnabled(self.backend.currentData() == 'glomap')
         self.color.setEnabled(self.backend.currentData() == 'fastmap')
         self.camera.setEnabled(self.backend.currentData() == 'fastmap')
+        self.solver_quality.setEnabled(self.backend.currentData() == 'fastmap')
         if len(self.metadata) == 1:
             info = next(iter(self.metadata.values()))
             scale = self.scale.currentData()
@@ -312,6 +429,11 @@ class TaskDialog(QDialog):
             scene = bool(self.job and self.job.get('scene'))
             if not scene and (set(paths) != set(self.metadata) or any(not Path(p).is_file() or Path(p).suffix.lower() not in VIDEO_EXTENSIONS for p in paths)):
                 raise ValueError('视频路径无效或无法读取，请检查输入素材。')
+            if self.name_validator:
+                prefix = self.name.text().strip()
+                names = [prefix + (' · ' + Path(path).stem if prefix and len(paths) > 1 else '')
+                         or Path(path).stem for path in paths]
+                self.name_validator(names, ignore_id=(self.job or {}).get('id'))
             fps = self.rate.currentData()
             if fps == -1:
                 fps = self.custom_rate.value()
@@ -325,10 +447,25 @@ class TaskDialog(QDialog):
                 'gpu_min_images': self.gpu_min.value(), 'camera_mode': self.camera.currentData(),
                 'cuda_decode': self.decode.isChecked(), 'color': self.color.isChecked(),
                 'glomap_gpu': self.gpu.isChecked(), 'image_scale': self.scale.currentData(),
-                'export_sequence': self.sequence.isChecked(), 'sequence_original': self.sequence_size.currentData()})
+                'export_sequence': self.sequence.isChecked(), 'sequence_original': self.sequence_size.currentData(),
+                'solver_quality': self.solver_quality.currentData()})
             Pipeline(options).preflight()
+            blender = None
+            if self.blend.isChecked():
+                if not self.mesh.isChecked() and not self.points.isChecked():
+                    raise ValueError('至少启用可编辑网格或彩色点显示其中一项。')
+                record = self.blender_version.currentData()
+                if not record:
+                    raise ValueError('请先选择 Blender 版本；软件启动后会自动缓存本机版本。')
+                settings = self.blender_settings
+                current_blender = self.current_blender
+                blender = dict(record, fps=self.blender_fps.value(), as_mesh=self.mesh.isChecked(),
+                                draw_points=self.points.isChecked(), suppress_warnings=self.warnings.isChecked(),
+                                background_images=self.background.isChecked(), point_radius=self.radius.value(),
+                                frame_start_offset=self.frame_start_offset.value(),
+                                paths=[r['path'] for r in self.blender_records])
             self.result_data = dict(paths=paths, name=self.name.text().strip(), options=options,
-                                    auto_blender=self.blend.isChecked())
+                                    auto_blender=self.blend.isChecked(), blender=blender)
             self.accept()
         except (ValueError, OSError) as error:
             self.error.setText(str(error)); self.error.show()
@@ -337,18 +474,17 @@ class TaskDialog(QDialog):
 class BlenderDialog(QDialog):
     def __init__(self, parent, settings, fps=30, opening=False):
         super().__init__(parent)
-        self.setWindowTitle('打开 Blender 文件' if opening else 'Blender 导出设置')
-        self.resize(650, 250 if opening else 550)
+        self.setWindowTitle('打开 Blender 工程' if opening else 'Blender 导出设置')
+        self.resize(600, 500 if opening else 620)
         self.result_data = None
         self.settings = dict(settings)
         self.opening = opening
-        self.records = []
-        self.pending = queue.Queue()
         layout = QVBoxLayout(self); layout.setContentsMargins(24, 20, 24, 20); layout.setSpacing(12)
-        layout.addWidget(label('选择 Blender 版本', 'sectionTitle'))
-        row = QHBoxLayout(); self.versions = QComboBox(); self.versions.setMinimumWidth(340)
-        row.addWidget(self.versions, 1); row.addWidget(button('添加版本…', self.browse)); layout.addLayout(row)
-        self.note = label('正在查找本机 Blender…'); layout.addWidget(self.note)
+        record = settings.get('_blender_record') or {}
+        layout.addWidget(label(record.get('version', '未检测到 Blender'), 'sectionTitle'))
+        path_note = label(record.get('path', '启动后将自动扫描并缓存本机 Blender 版本。'))
+        path_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(path_note)
         self.mesh = QCheckBox('同时生成可编辑网格（用于几何节点及渲染）'); self.mesh.setChecked(settings.get('blender_as_mesh', True))
         self.points = QCheckBox('显示彩色点（工程内保存颜色，无需额外安装插件）'); self.points.setChecked(settings.get('blender_draw_points', True))
         self.background = QCheckBox('预览和渲染使用抽帧背景'); self.background.setChecked(settings.get('blender_background_images', True))
@@ -356,58 +492,32 @@ class BlenderDialog(QDialog):
         from blender_export import default_point_radius
         self.radius = QDoubleSpinBox(); self.radius.setDecimals(4); self.radius.setRange(.0001, 100); self.radius.setValue(default_point_radius(settings))
         self.fps = QDoubleSpinBox(); self.fps.setDecimals(3); self.fps.setRange(.01, 240); self.fps.setValue(float(fps))
+        self.frame_start_offset = QSpinBox(); self.frame_start_offset.setRange(0, 10000)
+        self.frame_start_offset.setValue(int(settings.get('blender_frame_start_offset', 0)))
+        self.frame_start_offset.setSuffix(' 帧')
         if not opening:
             group = QGroupBox('摄影测量场景'); form = QFormLayout(group)
             for field in (self.points, self.mesh, self.background, self.warnings): form.addRow(field)
             form.addRow('网格渲染点半径', self.radius); form.addRow('Blender FPS', self.fps)
+            form.addRow('导出起始帧偏移（前置空帧）', self.frame_start_offset)
+            form.addRow(label('0 = 从第 1 帧开始；设置 30 时，相机轨迹与背景合成从第 31 帧开始。'))
             layout.addWidget(group)
             layout.addWidget(label('从本软件打开 Blender 文件会自动加载内置摄影测量插件。\n相机背景引用项目 _cache/images 图像，请保留缓存目录。'))
         layout.addStretch()
         row = QHBoxLayout(); row.addStretch(); row.addWidget(button('取消', self.reject))
-        self.confirm = button('打开文件' if opening else '确认导出设置', self.accept_settings, True); self.confirm.setEnabled(False)
+        self.confirm = button('打开文件' if opening else '确认导出设置', self.accept_settings, True)
+        self.confirm.setEnabled(bool(record.get('path')))
         row.addWidget(self.confirm); layout.addLayout(row)
         inset_numeric_fields(self)
-        self.timer = QTimer(self); self.timer.setInterval(100); self.timer.timeout.connect(self.receive); self.timer.start()
-        def discover():
-            try: self.pending.put((discover_blenders(self.settings), None))
-            except Exception as error: self.pending.put(([{'error': str(error)}], None))
-        threading.Thread(target=discover, daemon=True).start()
-
-    def receive(self):
-        while not self.pending.empty():
-            records, manual = self.pending.get_nowait()
-            if records and 'error' in records[0]:
-                self.note.setText(records[0]['error'])
-                continue
-            current = self.versions.currentData()
-            preferred = manual or (current or {}).get('path') or self.settings.get('blender_path')
-            for record in records:
-                if record['path'] not in [r['path'] for r in self.records]: self.records.append(record)
-            self.versions.clear()
-            for record in self.records: self.versions.addItem(f"{record['version']}  |  {record['path']}", record)
-            index = next((i for i, r in enumerate(self.records) if r['path'].casefold() == (preferred or '').casefold()), -1)
-            if index < 0 and len(self.records) == 1 and not preferred: index = 0
-            self.versions.setCurrentIndex(index)
-            self.note.setText(f'找到 {len(self.records)} 个版本，请选择本次使用的版本。' if self.records else '未找到可用版本，请手动添加 blender.exe。')
-            self.confirm.setEnabled(bool(self.records))
-
-    def browse(self):
-        path, _ = QFileDialog.getOpenFileName(self, '选择 Blender', '', 'Blender (blender.exe)')
-        if not path: return
-        self.note.setText('正在验证 Blender 版本…')
-        def safe_work():
-            try: self.pending.put(([probe_blender(path)], str(Path(path).resolve())))
-            except Exception as error: self.pending.put(([{'error': str(error)}], None))
-        threading.Thread(target=safe_work, daemon=True).start()
 
     def accept_settings(self):
-        record = self.versions.currentData()
+        record = self.settings.get('_blender_record')
         if not record:
-            self.note.setText('请选择本次使用的 Blender 版本。'); return
+            return
         if not self.opening and not self.mesh.isChecked() and not self.points.isChecked():
-            self.note.setText('请至少选择彩色点或可编辑网格。'); return
+            return
         self.result_data = dict(record, fps=self.fps.value(), as_mesh=self.mesh.isChecked(),
             draw_points=self.points.isChecked(), suppress_warnings=self.warnings.isChecked(),
             background_images=self.background.isChecked(), point_radius=self.radius.value(),
-            paths=[r['path'] for r in self.records])
+            frame_start_offset=self.frame_start_offset.value(), paths=self.settings.get('blender_paths', []))
         self.accept()

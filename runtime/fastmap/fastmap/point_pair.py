@@ -6,6 +6,7 @@ import torch.nn.functional as F
 
 from fastmap.container import PointPairs, Tracks
 from fastmap.utils import to_homogeneous
+from fastmap.memory_policy import current_limit
 
 
 @torch.no_grad()
@@ -16,93 +17,68 @@ def point_pairs_from_tracks(tracks: Tracks) -> PointPairs:
     Returns:
         point_pairs: PointPairs container
     """
-    ########## Get useful information ##########
-    # get the device
     device = tracks.device
-    # get the number of tracks
-    num_tracks = tracks.num_tracks
-    # get the min and max number of points in a track
-    min_track_size = tracks.track_size.min().item()
-    max_track_size = tracks.track_size.max().item()
-    min_track_size = typing.cast(int, min_track_size)
-    max_track_size = typing.cast(int, max_track_size)
-    # make sure the track idx of points are sorted
-    assert torch.all(tracks.track_idx == tracks.track_idx.sort().values)
-
-    ########## Initialize the memory for point pairs ##########
-    num_point_pairs = (tracks.track_size * (tracks.track_size - 1) // 2).sum().item()
-    num_point_pairs = typing.cast(int, num_point_pairs)
-    point_idx1 = 230492843028 + torch.zeros(
-        num_point_pairs, dtype=torch.long, device=device
-    )  # (num_point_pairs,)
-    point_idx2 = 230492843028 + torch.zeros(
-        num_point_pairs, dtype=torch.long, device=device
-    )  # (num_point_pairs,)
-
-    # this is the current location to write to
+    assert torch.all(tracks.track_idx[1:] >= tracks.track_idx[:-1])
+    num_point_pairs = int((tracks.track_size * (tracks.track_size - 1) // 2).sum())
+    # Observation indices need 32 bits for ordinary scenes, not 64. This is an
+    # exact integer representation, with an explicit overflow-safe fallback.
+    index_dtype = (torch.int32 if tracks.num_points2d <= 2**31 else torch.int64)
+    point_idx1 = torch.empty(num_point_pairs, dtype=index_dtype, device=device)
+    point_idx2 = torch.empty_like(point_idx1)
     pointer = 0
-
-    ########## Get all the possible point pairs ##########
-
-    # batch tracks with the same size
-    for ts in range(min_track_size, max_track_size + 1):
-        # get the point idx for tracks with size ts
-        point_idx = torch.nonzero(
-            tracks.track_size[tracks.track_idx] == ts, as_tuple=True
-        )[
-            0
-        ]  # (num_points_ts,)
-        # this reshaping uses the fact that points in the same track are grouped together in the Tracks container
-        point_idx = point_idx.view(-1, ts).contiguous()  # (num_tracks_ts, ts)
-
-        # get the number of tracks of size ts
-        num_tracks_ts = point_idx.shape[0]
-        if num_tracks_ts == 0:
+    batch_size = current_limit('sparse_batch', device)
+    for ts in sorted(tracks.track_size.unique().cpu().tolist()):
+        if ts < 2:
             continue
-
-        # get the combination idx
-        comb = torch.combinations(
-            torch.arange(ts, device=device), r=2, with_replacement=False
-        )  # (num_comb, 2)
-
-        # get all the combinations of point idx
-        num_point_pairs_per_track = comb.shape[0]
-        point_idx_pair = torch.gather(
-            input=point_idx[:, None, :].repeat(1, num_point_pairs_per_track, 1),
-            dim=-1,
-            index=comb[None, :, :].repeat(num_tracks_ts, 1, 1),
-        )  # (num_tracks_ts, num_comb, 2)
-        point_idx_pair = point_idx_pair.view(-1, 2)  # (num_point_pairs_ts, 2)
-
-        # write and increment the pointer
-        point_idx1[pointer : pointer + len(point_idx_pair)] = point_idx_pair[:, 0]
-        point_idx2[pointer : pointer + len(point_idx_pair)] = point_idx_pair[:, 1]
-        pointer += len(point_idx_pair)
-
-        logger.info(
-            f"Found {point_idx_pair.shape[0]} point pairs for {point_idx.shape[0]} tracks of size {ts}."
-        )
-
-    ######### Build the container ##########
-    # sanity check
-    assert torch.all(tracks.track_idx[point_idx1] == tracks.track_idx[point_idx2])
-
-    # form the container
-    point_pairs = PointPairs(
-        xy_pixels=tracks.xy_pixels,
-        xy=tracks.xy,
-        image_idx=tracks.image_idx,
-        keypoint_idx=tracks.keypoint_idx,
-        track_idx=tracks.track_idx,
-        point_idx1=point_idx1,
-        point_idx2=point_idx2,
+        starts = tracks.track_start[tracks.track_size == ts]
+        # Same lexicographic ordering as combinations(), without its cubic
+        # intermediate or repeating every track's observations per combination.
+        comb = torch.triu_indices(ts, ts, offset=1, device=device)
+        per_track = comb.shape[1]
+        count = len(starts) * per_track
+        for offset in range(0, count, batch_size):
+            flat = torch.arange(offset, min(offset + batch_size, count), device=device)
+            start = starts[flat // per_track]
+            which = flat % per_track
+            end = pointer + len(flat)
+            point_idx1[pointer:end] = (start + comb[0, which]).to(index_dtype)
+            point_idx2[pointer:end] = (start + comb[1, which]).to(index_dtype)
+            pointer = end
+        logger.info(f"Found {count} point pairs for {len(starts)} tracks of size {ts}.")
+    assert pointer == num_point_pairs
+    result = PointPairs(
+        xy_pixels=tracks.xy_pixels, xy=tracks.xy, image_idx=tracks.image_idx,
+        keypoint_idx=tracks.keypoint_idx, track_idx=tracks.track_idx,
+        point_idx1=point_idx1, point_idx2=point_idx2,
     )
+    logger.info(f"Found {num_point_pairs} point pairs in total from {tracks.num_tracks} tracks; "
+                f"compact indices, bounded geometry batches (up to {batch_size}).")
+    return result
 
-    logger.info(
-        f"Found {point_pairs.point_idx1.shape[0]} point pairs in total from {num_tracks} tracks."
-    )
 
-    return point_pairs
+@torch.no_grad()
+def image_pair_index(point_pairs, num_images, mask=None):
+    """Build the same sorted image-pair mapping as unique(..., dim=0).
+
+    The adjacency is image-sized; no point-pair-sized stack/sort or full
+    observation gather is created. Only selected entries of mapping are valid.
+    """
+    device = point_pairs.device
+    present = torch.zeros(num_images, num_images, device=device, dtype=torch.bool)
+    for indices in point_pairs.index_batches(mask):
+        i = point_pairs.image_idx[point_pairs.point_idx1[indices]]
+        j = point_pairs.image_idx[point_pairs.point_idx2[indices]]
+        assert torch.all(i < j)
+        present[i, j] = True
+    i, j = present.nonzero(as_tuple=True)
+    lookup = (present.flatten().long().cumsum(0) - 1).reshape(num_images, num_images)
+    dtype = torch.int32 if len(i) < 2**31 else torch.int64
+    mapping = torch.full((point_pairs.num_point_pairs,), -1, device=device, dtype=dtype)
+    for indices in point_pairs.index_batches(mask):
+        a = point_pairs.image_idx[point_pairs.point_idx1[indices]]
+        b = point_pairs.image_idx[point_pairs.point_idx2[indices]]
+        mapping[indices] = lookup[a, b].to(dtype)
+    return i, j, mapping
 
 
 @torch.no_grad()

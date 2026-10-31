@@ -1,8 +1,11 @@
 import typing
 from typing import Union, Optional
+import math
+import time
 
 import torch
 import torch.nn.functional as F
+from fastmap.optimization import policy, report_stop
 
 
 def to_homogeneous(x):
@@ -113,6 +116,13 @@ class ConvergenceManager:
         decay: float,
         convergence_window: int,
         margin: float = 0.0,
+        relative_tolerance: Optional[float] = None,
+        max_steps: Optional[int] = None,
+        max_seconds: Optional[float] = None,
+        parameters=None,
+        stage: str = 'optimization',
+        deadline: Optional[float] = None,
+        clock=time.monotonic,
     ):
         """
         Args:
@@ -120,11 +130,27 @@ class ConvergenceManager:
             decay (float): the moving loss decay
             convergence_window (int): the window size for convergence check
             margin (float): the margin for convergence check
+            relative_tolerance: minimum meaningful improvement relative to the reference loss.
+            max_steps / max_seconds: safety budget for a single optimization loop.
+            parameters: parameters to checkpoint before gradient updates and restore on exit.
         """
         self.warmup_steps = warmup_steps
         self.decay = decay
         self.convergence_window = convergence_window
         self.margin = margin
+        limits = policy()
+        self.relative_tolerance = limits['relative_tolerance'] if relative_tolerance is None else relative_tolerance
+        self.max_steps = limits['max_iterations'] if max_steps is None else min(max_steps, limits['max_iterations'])
+        self.max_seconds = limits['max_seconds'] if max_seconds is None else max_seconds
+        if (type(warmup_steps) is not int or type(convergence_window) is not int
+                or warmup_steps < 0 or convergence_window < 1 or not 0 <= decay < 1
+                or type(self.max_steps) is not int or self.max_steps < 1
+                or not math.isfinite(self.max_seconds) or self.max_seconds <= 0
+                or not math.isfinite(self.relative_tolerance) or self.relative_tolerance < 0
+                or not math.isfinite(margin) or margin < 0):
+            raise ValueError('Invalid convergence limits')
+        self.parameters = list(parameters) if parameters is not None else []
+        self.stage, self.deadline, self.clock = stage, deadline, clock
 
         self.start()
 
@@ -132,12 +158,38 @@ class ConvergenceManager:
         self._moving_loss = None
         self._min_moving_loss = None
         self._min_moving_loss_step = None
+        self.best_loss = math.inf
+        self.best_parameters = None
+        self.reason = None
+        self.started = self.clock()
+
+    def restore_best(self):
+        if self.best_parameters is not None:
+            with torch.no_grad():
+                for parameter, saved in zip(self.parameters, self.best_parameters):
+                    parameter.copy_(saved)
+
+    def _stop(self, reason, step):
+        self.reason = reason
+        report_stop(self.stage, reason, iteration=step + 1, max_iterations=self.max_steps,
+                    elapsed_seconds=round(self.clock() - self.started, 3),
+                    best_loss=self.best_loss if math.isfinite(self.best_loss) else None)
+        return self._moving_loss, True
 
     def step(self, step: int, loss: Union[torch.Tensor, float]):
         """Returns tuple (moving_loss, if_converged)"""
 
         if isinstance(loss, torch.Tensor):
             loss = loss.item()
+        if self.reason:
+            return self._moving_loss, True
+        if not math.isfinite(loss):
+            if self.best_parameters is None:
+                raise FloatingPointError(f'{self.stage}: no finite optimization state')
+            return self._stop('nonfinite_loss', step)
+        if loss < self.best_loss:
+            self.best_loss = loss
+            self.best_parameters = [p.detach().clone() for p in self.parameters]
 
         # update moving loss
         if self._moving_loss is None:
@@ -154,7 +206,8 @@ class ConvergenceManager:
         if_converged = False
         if (
             step < self.warmup_steps
-            or self._moving_loss <= self._min_moving_loss - self.margin
+            or self._min_moving_loss - self._moving_loss > max(
+                self.margin, abs(self._min_moving_loss) * self.relative_tolerance, 1e-12)
         ):
             # update min moving loss and step if still in warmup or current loss is smaller
             self._min_moving_loss = self._moving_loss
@@ -165,7 +218,15 @@ class ConvergenceManager:
             pass
 
         # return
-        return self._moving_loss, if_converged
+        if if_converged:
+            return self._stop('plateau', step)
+        if self.deadline is not None and self.clock() >= self.deadline:
+            return self._stop('stage_time_limit', step)
+        if self.clock() - self.started >= self.max_seconds:
+            return self._stop('time_limit', step)
+        if step + 1 >= self.max_steps:
+            return self._stop('iteration_limit', step)
+        return self._moving_loss, False
 
 
 @torch.no_grad()

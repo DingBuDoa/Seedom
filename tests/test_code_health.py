@@ -29,6 +29,25 @@ def wait_until(predicate, timeout=5):
 
 
 class QueueHealthTests(unittest.TestCase):
+    def test_missing_source_is_failed_and_later_queue_items_continue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            valid = Path(directory) / 'present.mp4'; valid.write_bytes(b'placeholder')
+            events, calls = [], []
+            missing = str(Path(directory) / 'removed.mp4')
+            def run(path, existing_scene=False):
+                calls.append(path)
+                return {'status': 'complete', 'model': str(Path(directory) / 'point could')}
+            tasks = TaskQueue(events.append, Pipeline, lambda result: None)
+            first = tasks.add(missing, Options())
+            second = tasks.add(valid, Options())
+            with patch.object(Pipeline, 'run', side_effect=run):
+                tasks.start(); wait_until(lambda: not tasks.running)
+            self.assertEqual(tasks.jobs[first]['state'], '失败')
+            self.assertIn('源文件不存在', tasks.jobs[first]['error'])
+            self.assertEqual(tasks.jobs[second]['state'], '完成')
+            self.assertEqual(calls, [str(valid.resolve())])
+            self.assertTrue(any('[源文件丢失]' in event.get('text', '') for event in events))
+
     def test_unwritable_task_log_does_not_abort_remaining_jobs(self):
         events = []
         class Solver(Pipeline):

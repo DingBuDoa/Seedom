@@ -5,10 +5,10 @@ import sys
 
 import PySide6
 from PySide6.QtCore import Qt, QUrl, qVersion
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QDesktopServices, QIcon
 from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea, QSizePolicy
 
-from app_info import APP_NAME, APP_VERSION, BUILD_DATE, OPEN_SOURCE_PROJECTS
+from app_info import APP_NAME, APP_VERSION, BUILD_DATE, PROJECT_URL, OPEN_SOURCE_PROJECTS
 from paths import ROOT
 from qt_dialogs import label, button
 
@@ -43,10 +43,11 @@ def about_page(open_path):
     card = QWidget(); card.setObjectName('aboutCard'); card.setFixedWidth(700)
     card.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
     content = QVBoxLayout(card); content.setContentsMargins(30,26,30,24); content.setSpacing(0)
-    logo = label('PS', 'aboutLogo'); logo.setFixedSize(52,52); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    logo = label('', 'aboutLogo'); logo.setFixedSize(80,80); logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    logo.setPixmap(QIcon(str(ROOT / 'LOGO.ico')).pixmap(80, 80))
     content.addWidget(logo, 0, Qt.AlignmentFlag.AlignHCenter); content.addSpacing(12)
     title = label(APP_NAME, 'aboutName'); title.setAlignment(Qt.AlignmentFlag.AlignCenter); content.addWidget(title)
-    subtitle = label('Blender 实景合成图形化工具', 'aboutSubtitle'); subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    subtitle = label('SeedomVFX · Blender 实景合成工具', 'aboutSubtitle'); subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
     content.addWidget(subtitle); content.addSpacing(17)
     metadata = QWidget(); metadata.setObjectName('aboutMeta')
     meta = QHBoxLayout(metadata); meta.setContentsMargins(16,12,16,12); meta.setSpacing(12)
@@ -57,6 +58,15 @@ def about_page(open_path):
     description = label('从视频提取相机轨迹与彩色点云，生成可继续创作的 Blender 工程。\n素材处理、任务队列与多版本导出，在同一工作区完成。', 'aboutDescription')
     description.setMinimumHeight(40)
     description.setAlignment(Qt.AlignmentFlag.AlignCenter); content.addWidget(description); content.addSpacing(17)
+    repository = QWidget(); repository.setObjectName('aboutRepositoryCard')
+    repository_layout = QVBoxLayout(repository); repository_layout.setContentsMargins(16,12,16,12)
+    repository_layout.setSpacing(5)
+    repository_header = QHBoxLayout()
+    repository_header.addWidget(label('项目开源仓库', 'aboutSection'))
+    repository_header.addStretch(); repository_header.addWidget(label('GitHub', 'aboutPurpose'))
+    repository_layout.addLayout(repository_header)
+    repository_layout.addWidget(source_link(PROJECT_URL.removeprefix('https://'), PROJECT_URL, 'aboutRepository'))
+    content.addWidget(repository); content.addSpacing(19)
     section = QHBoxLayout(); section.addWidget(label('核心开源项目', 'aboutSection')); section.addStretch()
     section.addWidget(label('感谢开源社区', 'muted')); content.addLayout(section); content.addSpacing(6)
     projects = (*OPEN_SOURCE_PROJECTS,

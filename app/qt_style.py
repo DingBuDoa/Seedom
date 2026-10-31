@@ -23,7 +23,7 @@ QLabel#title { font-size: 20px; font-weight: 600; }
 QLabel#sectionTitle { font-size: 15px; font-weight: 600; }
 QLabel#muted { color: #8b939f; font-size: 12px; }
 QLabel#brand { font-family: "Segoe UI"; font-size: 18px; font-weight: 600; }
-QLabel#mark { background: #2f6bff; color: white; border-radius: 7px; font-weight: 700; font-family: "Segoe UI"; }
+QLabel#mark { background: transparent; }
 QLabel#banner { background: #fff8e6; border: 1px solid #f0dca8; border-radius: 6px; color: #836314; padding: 10px; }
 QWidget#solverNotice { background: #fff8e6; border-bottom: 1px solid #f0dca8; }
 QLabel#solverNoticeText { color: #836314; }
@@ -33,6 +33,9 @@ QPushButton:pressed { background: #eef0f4; }
 QPushButton:disabled, QToolButton:disabled { color: #b4bac4; background: #fafbfc; border-color: #e5e8ed; }
 QPushButton#primary { background: #2f6bff; border-color: #2f6bff; color: white; font-weight: 600; }
 QPushButton#primary:hover { background: #2559db; }
+QPushButton#startQueue { background: #15845d; border-color: #15845d; color: white; font-weight: 700; }
+QPushButton#startQueue:hover { background: #116c4b; }
+QPushButton#startQueue:disabled { background: #a8c9bc; border-color: #a8c9bc; color: #f5f7ff; }
 QPushButton#primary:disabled { background: #aebfe9; border-color: #aebfe9; color: #f5f7ff; }
 QPushButton#danger { color: #d8443c; }
 QPushButton#iconButton { padding: 0; }
@@ -83,7 +86,7 @@ QStatusBar { background: white; border-top: 1px solid #e3e5e9; color: #626a76; }
 QDialogButtonBox { background: transparent; }
 QWidget#aboutCanvas { background: #f4f5f7; }
 QWidget#aboutCard { background: white; border: 1px solid #e3e5e9; border-radius: 10px; }
-QLabel#aboutLogo { background: #2f6bff; color: white; border-radius: 12px; font-family: "Segoe UI"; font-size: 18px; font-weight: 700; }
+QLabel#aboutLogo { background: transparent; }
 QLabel#aboutName { font-family: "Segoe UI"; font-size: 23px; font-weight: 600; }
 QLabel#aboutSubtitle { color: #98a0ac; font-size: 12px; padding-top: 4px; }
 QWidget#aboutMeta { border-top: 1px solid #e3e5e9; border-bottom: 1px solid #e3e5e9; }
@@ -96,6 +99,8 @@ QLabel#aboutProjectName { color: #303744; font-size: 12px; font-weight: 600; }
 QLabel#aboutPurpose { color: #98a0ac; font-size: 11px; }
 QLabel#aboutVersion { color: #626a76; font-size: 11px; font-family: "Segoe UI", "Microsoft YaHei UI"; }
 QLabel#aboutLink { font-size: 11px; }
+QWidget#aboutRepositoryCard { background: #f0f5ff; border: 1px solid #dce7ff; border-radius: 8px; }
+QLabel#aboutRepository { font-size: 12px; }
 QLabel#aboutFootnote { color: #98a0ac; font-size: 11px; }
 '''
 

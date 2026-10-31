@@ -13,14 +13,14 @@ import time
 import traceback
 
 from PySide6.QtCore import (Qt, QAbstractTableModel, QModelIndex, QSortFilterProxyModel,
-                            QTimer, QSize, QUrl, QRect, QEvent)
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QDesktopServices, QAction, QKeySequence, QTextCursor
+                            QTimer, QSize, QUrl, QRect, QPoint, QEvent)
+from PySide6.QtGui import QColor, QFont, QFontDatabase, QDesktopServices, QAction, QKeySequence, QTextCursor, QPainter, QIcon
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTableView, QHeaderView, QAbstractItemView,
     QStackedWidget, QButtonGroup, QSplitter, QFormLayout, QGroupBox, QScrollArea,
     QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QFileDialog, QMessageBox,
     QMenu, QDialog, QPlainTextEdit, QProgressBar, QInputDialog, QStyledItemDelegate,
-    QStyleOptionViewItem, QStyle, QSizePolicy, QToolTip)
+    QStyleOptionViewItem, QStyle, QSizePolicy, QToolTip, QScrollBar)
 
 from tracker_core import Options, Pipeline, Cancelled
 from paths import ROOT, APP, CONFIG, LOGS, OUTPUTS, BINARY_DIRS, saved_path, portable_path
@@ -31,10 +31,13 @@ from hardware import get_hardware, describe_hardware
 from log_management import rotate_log, RETENTION_CHOICES, expired_logs, delete_expired
 from task_queue import TaskQueue, MOVABLE_STATES
 from qt_dialogs import TaskDialog, BlenderDialog, button, label
+from blender_runtime import discover_blenders, probe_blender
 from qt_style import STYLE, icon, inset_numeric_fields
 from app_info import APP_NAME, APP_VERSION, SOLVER_CHOICES
 from json_store import atomic_write_json
 from task_storage import restore_jobs
+from task_progress import live_remaining
+from solver_quality import SOLVER_PROFILES, quality_note
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 SOLVERS = {'fastmap': 'FastMap', 'glomap-gpu': 'GLOMap · GPU', 'glomap-cpu': 'GLOMap · CPU', 'glomap': 'GLOMap'}
@@ -116,26 +119,98 @@ class TaskFilter(QSortFilterProxyModel):
 
 
 class TaskTableView(QTableView):
-    """Fill unused space on window resize without competing with header dragging."""
+    """Keep the separate action rail refreshed as table rows move."""
     def __init__(self):
         super().__init__()
-        self.name_fit_ready = False
-        self.fit_viewport_width = None
-
-    def fit_name_column(self):
-        if not self.name_fit_ready: return
-        width = self.viewport().width()
-        used = sum(self.columnWidth(column) for column in range(1, self.model().columnCount())
-                   if not self.isColumnHidden(column))
-        # Refit only when the viewport changes, never during a header drag.
-        # A manually adjusted name column must still follow later window sizes.
-        self.setColumnWidth(0, max(220, width - used))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'fit_viewport_width') and self.viewport().width() != self.fit_viewport_width:
-            self.fit_viewport_width = self.viewport().width()
-            self.fit_name_column()
+        overlay = getattr(self, 'sticky_actions', None)
+        if overlay:
+            overlay.update()
+
+
+class StickyActions(QWidget):
+    """Render row actions in a fixed rail beside the horizontally scrolling table."""
+    WIDTH = 142
+
+    def __init__(self, table, callback, parent):
+        super().__init__(parent)
+        self.table, self.callback = table, callback
+        self.setFixedWidth(self.WIDTH)
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
+        self.setAutoFillBackground(True)
+
+    def row_rect(self, row_number):
+        index = self.table.model().index(row_number, 0)
+        rect = self.table.visualRect(index)
+        top = self.table.viewport().mapTo(self.parentWidget(), rect.topLeft()).y()
+        return QRect(0, top, self.width(), rect.height())
+
+    def paintEvent(self, _event):
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor('#ffffff'))
+        header = self.table.horizontalHeader()
+        header_bottom = header.mapTo(self.parentWidget(), QPoint(0, header.height())).y()
+        painter.fillRect(0, 0, self.width(), header_bottom, QColor('#fafbfc'))
+        action_left = 0
+        painter.setPen(QColor('#e3e5e9'))
+        painter.drawLine(0, header_bottom - 1, self.width(), header_bottom - 1)
+        painter.setPen(QColor('#89929f'))
+        painter.drawText(QRect(action_left + 12, 0, self.WIDTH - 20, header_bottom),
+                         Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, '操作')
+        model = self.table.model()
+        delegate = self.table.itemDelegate()
+        for row_number in range(model.rowCount()):
+            row_rect = self.row_rect(row_number)
+            y, height = row_rect.top(), row_rect.height()
+            if y + height <= 0 or y >= self.height(): continue
+            index = model.index(row_number, 6)
+            row = index.data(Qt.ItemDataRole.UserRole)
+            if row is None: continue
+            if self.table.selectionModel().isRowSelected(row_number, QModelIndex()):
+                painter.fillRect(0, y, self.width(), height, QColor('#eaf0ff'))
+            painter.setPen(QColor('#eef0f4'))
+            painter.drawLine(0, y + height - 1, self.width(), y + height - 1)
+            for (name, _, enabled), x in zip(row_actions(row),
+                                              range(action_left + 6, action_left + 6 + 5 * 26, 26)):
+                delegate.icons[name, enabled].paint(painter, QRect(x + 5, y + (height - 26) // 2 + 5, 16, 16))
+
+    def mouseReleaseEvent(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return super().mouseReleaseEvent(event)
+        point = event.position().toPoint()
+        row_number = next((index for index in range(self.table.model().rowCount())
+                           if self.row_rect(index).contains(point)), -1)
+        if row_number < 0: return
+        index = self.table.model().index(row_number, 6)
+        row = index.data(Qt.ItemDataRole.UserRole)
+        if row is None: return
+        action_index = (event.position().toPoint().x() - 6) // 26
+        if 0 <= action_index < 5:
+            name, _, enabled = row_actions(row)[action_index]
+            if enabled: QTimer.singleShot(0, lambda: self.callback(row, name))
+        self.update()
+
+    def mousePressEvent(self, event):
+        if event.position().toPoint().y() < self.table.horizontalHeader().height():
+            event.accept(); return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        point = event.position().toPoint()
+        row_number = next((index for index in range(self.table.model().rowCount())
+                           if self.row_rect(index).contains(point)), -1)
+        offset = event.position().toPoint().x() - 6
+        action_index = offset // 26
+        if row_number >= 0 and 0 <= action_index < 5:
+            index = self.table.model().index(row_number, 6)
+            row = index.data(Qt.ItemDataRole.UserRole)
+            name, title, enabled = row_actions(row)[action_index]
+            self.setToolTip(title + ('' if enabled else '（当前不可用）'))
+        else:
+            self.setToolTip('')
+        super().mouseMoveEvent(event)
 
 
 class TaskDelegate(QStyledItemDelegate):
@@ -212,7 +287,7 @@ class MainWindow(QMainWindow):
     def __init__(self, config_dir=None, background=True):
         super().__init__()
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION} · 相机求解与点云')
-        self.setWindowIcon(icon('tasks', '#2f6bff'))
+        self.setWindowIcon(QIcon(str(ROOT / 'LOGO.ico')))
         self.resize(1360, 870); self.setMinimumSize(1020, 680)
         self.config_dir = Path(config_dir) if config_dir else CONFIG
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -222,6 +297,11 @@ class MainWindow(QMainWindow):
             self.config = json.loads(self.settings_path.read_text(encoding='utf-8'))
             if not isinstance(self.config, dict): self.config = {}
         except (OSError, ValueError): self.config = {}
+        self.blender_records = [record for record in self.config.get('blender_records', [])
+                                if isinstance(record, dict) and record.get('path') and record.get('version')]
+        self.blender_pending = queue.Queue()
+        self.blender_discovery_running = False
+        self.active_task_dialog = None
         known = {f.name for f in fields(Options)}
         values = {key: value for key, value in self.config.items() if key in known}
         settings_error = None
@@ -238,12 +318,16 @@ class MainWindow(QMainWindow):
         if settings_error:
             self.events.put(dict(type='log', text=f'[设置恢复] 处理参数无效，已使用默认值：{settings_error}\n'))
         self.tasks = TaskQueue(self.events.put)
+        self.tasks.reuse_failed_projects = self.config.get('reuse_failed_projects') is True
         self.records = {}
         self.project_loading = False
         self.project_refresh_pending = False
         self.export_pipeline = None
         self.exporting = False
         self.started = 0
+        self.active_progress = None
+        self.active_progress_iid = None
+        self.progress_log_at = 0
         self.estimate_generation = 0
         self.log_lines = deque(); self.log_chars = 0
         self.log_dialog = self.log_widget = None
@@ -258,6 +342,7 @@ class MainWindow(QMainWindow):
         if background:
             QTimer.singleShot(100, self.refresh_projects)
             QTimer.singleShot(300, self.check_environment)
+            QTimer.singleShot(120, self.cache_blender_versions)
             QTimer.singleShot(1200, self.automatic_cleanup)
 
     @property
@@ -270,9 +355,12 @@ class MainWindow(QMainWindow):
         side = QWidget(); side.setObjectName('sidebar'); side.setFixedWidth(196)
         sl = QVBoxLayout(side); sl.setContentsMargins(12, 22, 12, 16); sl.setSpacing(4)
         brand = QHBoxLayout(); brand.setContentsMargins(6, 0, 0, 0); brand.setSpacing(10)
-        mark = QLabel('PS'); mark.setObjectName('mark'); mark.setFixedSize(33, 33); mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark = QLabel(); mark.setObjectName('mark'); mark.setFixedSize(46, 46); mark.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        mark.setPixmap(QIcon(str(ROOT / 'LOGO.ico')).pixmap(QSize(46, 46)))
         brand.addWidget(mark)
-        names = QVBoxLayout(); names.setSpacing(1); names.addWidget(label(APP_NAME, 'brand')); names.addWidget(label('相机求解与点云'))
+        names = QVBoxLayout(); names.setSpacing(1)
+        names.addWidget(label('拾点VFX', 'brand'))
+        names.addWidget(label('SeedomVFX'))
         brand.addLayout(names); brand.addStretch(); sl.addLayout(brand); sl.addSpacing(25)
         self.pages = QStackedWidget(); self.nav_group = QButtonGroup(self)
         for i, (text, name) in enumerate((('任务', 'tasks'), ('设置', 'settings'), ('关于', 'about'))):
@@ -312,7 +400,7 @@ class MainWindow(QMainWindow):
         self.add_button = button('添加任务', self.add_task, True); self.add_button.setIcon(icon('plus', 'white')); top.addWidget(self.add_button)
         hl.addLayout(top)
         tools = QHBoxLayout(); tools.setSpacing(8)
-        self.start_button = button('开始队列', self.start_queue); self.start_button.setIcon(icon('play', '#2f6bff')); tools.addWidget(self.start_button)
+        self.start_button = button('开始队列', self.start_queue, True); self.start_button.setObjectName('startQueue'); self.start_button.setIcon(icon('play', 'white')); self.start_button.setMinimumWidth(118); self.start_button.setFixedHeight(36); tools.addWidget(self.start_button)
         self.start_button.setToolTip('按执行顺序依次处理全部待执行任务')
         self.pause_button = button('暂停队列', self.toggle_pause); self.pause_button.setIcon(icon('pause')); tools.addWidget(self.pause_button)
         self.stop_button = button('停止', self.stop); self.stop_button.setIcon(icon('stop')); tools.addWidget(self.stop_button)
@@ -350,12 +438,27 @@ class MainWindow(QMainWindow):
         self.banner = label('', 'banner'); self.banner.hide(); layout.addWidget(self.banner)
         split = QSplitter(Qt.Orientation.Vertical); split.setChildrenCollapsible(False)
         area = QWidget(); al = QVBoxLayout(area); al.setContentsMargins(24, 16, 24, 12); al.setSpacing(8)
+        self.table_area = QWidget(); self.table_area.setObjectName('taskTableArea')
+        table_layout = QHBoxLayout(self.table_area); table_layout.setContentsMargins(0, 0, 0, 0); table_layout.setSpacing(0)
         self.table = TaskTableView(); self.model = TaskModel(self); self.proxy = TaskFilter(self); self.proxy.setSourceModel(self.model)
         self.table.setModel(self.proxy); self.table.setItemDelegate(TaskDelegate(self.table, self.row_action))
+        self.sticky_actions = StickyActions(self.table, self.row_action, self.table_area)
+        self.table.sticky_actions = self.sticky_actions
+        self.table_vscroll = QScrollBar(Qt.Orientation.Vertical, self.table_area)
+        self.table_vscroll.setObjectName('taskTableScrollBar')
+        self.table_vscroll.setFixedWidth(10)
+        internal_vscroll = self.table.verticalScrollBar()
+        internal_vscroll.rangeChanged.connect(self.sync_table_scrollbar)
+        internal_vscroll.valueChanged.connect(self.table_vscroll.setValue)
+        self.table_vscroll.valueChanged.connect(internal_vscroll.setValue)
+        self.model.modelReset.connect(lambda: QTimer.singleShot(0, self.sync_table_scrollbar))
+        self.sync_table_scrollbar()
+        table_layout.addWidget(self.table, 1); table_layout.addWidget(self.sticky_actions); table_layout.addWidget(self.table_vscroll)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setShowGrid(False); self.table.setWordWrap(False); self.table.setSortingEnabled(True)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table.sortByColumn(-1, Qt.SortOrder.AscendingOrder)
         self.table.verticalHeader().hide(); self.table.verticalHeader().setDefaultSectionSize(58)
         self.table.horizontalHeader().setHighlightSections(False)
@@ -364,23 +467,33 @@ class MainWindow(QMainWindow):
         for column, width in enumerate((300, 110, 125, 110, 125, 125, 142)):
             self.table.setColumnWidth(column, width)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)
-        self.table.name_fit_ready = True
+        self.table.setColumnHidden(6, True)
         self.table.horizontalHeader().sortIndicatorChanged.connect(self.sort_indicator_changed)
+        self.table.viewport().installEventFilter(self)
         self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.verticalScrollBar().valueChanged.connect(lambda *_: self.sticky_actions.update())
+        self.table.horizontalScrollBar().valueChanged.connect(lambda *_: self.sticky_actions.update())
+        self.table.selectionModel().selectionChanged.connect(lambda *_: self.sticky_actions.update())
         self.table.selectionModel().selectionChanged.connect(self.update_details)
         self.table.doubleClicked.connect(self.row_double_click)
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.context_menu)
-        al.addWidget(self.table, 1)
+        al.addWidget(self.table_area, 1)
         self.empty = QLabel(self.table.viewport()); self.empty.setObjectName('muted'); self.empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.empty.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.empty.setText('还没有任务\n\n点击「添加任务」选择视频，或从右上角菜单加入已有项目目录')
         self.table.viewport().installEventFilter(self)
         self.estimate_label = label('预估任务时长：添加视频后自动估算'); al.addWidget(self.estimate_label)
-        self.state_label = label('就绪'); al.addWidget(self.state_label)
+        self.state_label = label('就绪', 'sectionTitle'); al.addWidget(self.state_label)
         self.progress = QProgressBar(); self.progress.setRange(0, 5); self.progress.setValue(0); self.progress.setTextVisible(False); al.addWidget(self.progress)
+        self.phase_progress = QProgressBar(); self.phase_progress.setTextVisible(False)
+        self.phase_progress.setToolTip('当前阶段的实际计数；无确定总数时显示等待动画。')
+        self.phase_progress.hide(); al.addWidget(self.phase_progress)
+        self.progress_note = label(''); self.progress_note.setWordWrap(True)
+        self.progress_note.hide(); al.addWidget(self.progress_note)
         split.addWidget(area)
         detail = QWidget(); detail.setObjectName('detail'); dl = QVBoxLayout(detail); dl.setContentsMargins(24, 14, 24, 16); dl.setSpacing(10)
         row = QHBoxLayout(); self.detail_title = label('任务详情', 'sectionTitle'); row.addWidget(self.detail_title); row.addStretch()
@@ -400,17 +513,24 @@ class MainWindow(QMainWindow):
     def eventFilter(self, watched, event):
         if hasattr(self, 'empty') and watched is self.table.viewport():
             self.empty.setGeometry(self.table.viewport().rect())
+            if hasattr(self, 'sticky_actions'): self.sticky_actions.update()
+            if event.type() == QEvent.Type.Resize:
+                QTimer.singleShot(0, self.sync_table_scrollbar)
         return super().eventFilter(watched, event)
+
+    def sync_table_scrollbar(self, *_):
+        if not hasattr(self, 'table_vscroll'):
+            return
+        source = self.table.verticalScrollBar()
+        self.table_vscroll.setRange(source.minimum(), source.maximum())
+        self.table_vscroll.setPageStep(max(1, source.pageStep()))
+        self.table_vscroll.setSingleStep(max(1, source.singleStep()))
+        self.table_vscroll.setValue(source.value())
+        self.table_vscroll.setVisible(source.maximum() > source.minimum())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if hasattr(self, 'table'):
-            compact = self.width() < 1200
-            if compact != getattr(self, 'compact_table', None):
-                self.compact_table = compact
-                self.table.setColumnHidden(4, compact)
-                self.table.setColumnHidden(1, compact)
-                self.table.fit_name_column()
+        if hasattr(self, 'sticky_actions'): self.sticky_actions.update()
 
     def build_settings(self):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); body = QWidget(); body.setObjectName('workspace'); scroll.setWidget(body)
@@ -431,6 +551,13 @@ class MainWindow(QMainWindow):
         for key, text in SOLVER_CHOICES.items(): backend.addItem(text, key)
         backend.setCurrentIndex(0 if self.defaults.backend == 'fastmap' else 1)
         self.default_controls['backend'] = backend; form.addRow('求解方案', backend)
+        quality = QComboBox()
+        for key, profile in SOLVER_PROFILES.items(): quality.addItem(profile['title'], key)
+        quality.setCurrentIndex(quality.findData(self.defaults.solver_quality))
+        self.default_controls['solver_quality'] = quality; form.addRow('FastMap 计算精度', quality)
+        note = label(quality_note(self.defaults.solver_quality))
+        quality.currentIndexChanged.connect(lambda: note.setText(quality_note(quality.currentData())))
+        form.addRow(note)
         camera = QComboBox(); camera.addItem('自动估计畸变（FastMap）', 'radial'); camera.addItem('近似针孔（FastMap）', 'pinhole'); camera.setCurrentIndex(max(0, camera.findData(self.defaults.camera_mode))); self.default_controls['camera_mode'] = camera; form.addRow('相机模型', camera)
         for key, title in [('cuda_decode', 'CUDA 视频解码'), ('color', 'FastMap 点云取色'), ('glomap_gpu', 'GLOMAP 使用 CUDA / cuDSS 求解')]:
             control = QCheckBox(title); control.setChecked(getattr(self.defaults, key)); self.default_controls[key] = control; form.addRow(control)
@@ -440,10 +567,19 @@ class MainWindow(QMainWindow):
             control = QLineEdit(getattr(self.defaults, key)); self.default_controls[key] = control
             row = QHBoxLayout(); row.addWidget(control, 1); row.addWidget(button('浏览…', lambda checked=False, k=key: self.browse_default(k))); form.addRow(title, row)
         form.addRow(label('每个项目自动建立同名文件夹：point could（点云）、log（日志）、video（可选序列帧）、_cache（必要缓存）。'))
+        self.reuse_failed_projects = QCheckBox('失败任务重试时复用原项目目录')
+        self.reuse_failed_projects.setChecked(self.tasks.reuse_failed_projects)
+        form.addRow(self.reuse_failed_projects)
+        retry_note = label('启用后，重新添加同名、同素材的未完成任务也会复用目录。参数一致时沿用缓存；参数变化时重建缓存，旧缓存存入 _cache/retry_history。已完成项目另建目录。')
+        retry_note.setWordWrap(True)
+        form.addRow(retry_note)
         self.environment_info = label('使用随软件提供的独立运行环境。'); form.addRow(self.environment_info)
         form.addRow(button('重新检测运行环境', self.check_environment)); layout.addWidget(group)
         group, form = settings_form('Blender 与日志')
         self.blender_fps = QDoubleSpinBox(); self.blender_fps.setRange(.01, 240); self.blender_fps.setDecimals(3); self.blender_fps.setValue(float(self.config.get('blender_fps', 30))); form.addRow('默认 Blender FPS', self.blender_fps)
+        self.blender_frame_start_offset = QSpinBox(); self.blender_frame_start_offset.setRange(0, 10000); self.blender_frame_start_offset.setValue(int(self.config.get('blender_frame_start_offset', 0))); self.blender_frame_start_offset.setSuffix(' 帧'); form.addRow('默认导出起始帧偏移', self.blender_frame_start_offset)
+        self.blender_cache_label = label(f'检测到 {len(self.blender_records)} 个 Blender 版本。' if self.blender_records else '启动时自动检测 Blender 版本。'); form.addRow('Blender 版本', self.blender_cache_label)
+        form.addRow(button('重新扫描 Blender 版本', self.cache_blender_versions))
         self.retention = QComboBox()
         for title, days in RETENTION_CHOICES.items(): self.retention.addItem(title, days)
         self.retention.setCurrentIndex(max(0, self.retention.findData(self.config.get('log_retention_days', 0)))); form.addRow('日志保留策略', self.retention)
@@ -667,10 +803,21 @@ class MainWindow(QMainWindow):
 
     def add_task(self, paths=None):
         if isinstance(paths, bool): paths = None
-        dialog = TaskDialog(self, self.defaults, paths=paths)
-        if dialog.exec() != QDialog.DialogCode.Accepted: return
-        data = dialog.result_data; blender = self.choose_blender() if data['auto_blender'] else None
+        self.ensure_blender_versions()
+        dialog = TaskDialog(self, self.defaults, paths=paths,
+                            blender_records=self.blender_records, blender_settings=self.config,
+                            name_validator=self.tasks.validate_names)
+        self.active_task_dialog = dialog
+        try: accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        finally: self.active_task_dialog = None
+        if not accepted: return
+        data = dialog.result_data; blender = data.get('blender') if data['auto_blender'] else None
         if data['auto_blender'] and not blender: return
+        names = [data['name'] + (' · ' + Path(path).stem if data['name'] and len(data['paths']) > 1 else '')
+                 or Path(path).stem for path in data['paths']]
+        self.tasks.validate_names(names)
+        if blender:
+            self.remember_blender_settings(blender)
         for path in data['paths']:
             name = data['name']
             if name and len(data['paths']) > 1: name += ' · ' + Path(path).stem
@@ -686,12 +833,22 @@ class MainWindow(QMainWindow):
         if not job: return
         self.update_busy()
         try:
-            dialog = TaskDialog(self, Options(**job['options']), job=job)
-            if dialog.exec() == QDialog.DialogCode.Accepted:
+            self.ensure_blender_versions()
+            dialog = TaskDialog(self, Options(**job['options']), job=job,
+                                blender_records=self.blender_records, blender_settings=self.config,
+                                name_validator=self.tasks.validate_names)
+            self.active_task_dialog = dialog
+            try: accepted = dialog.exec() == QDialog.DialogCode.Accepted
+            finally: self.active_task_dialog = None
+            if accepted:
                 data = dialog.result_data
-                blender = self.choose_blender(preferred=(job.get('blender') or {}).get('path')) if data['auto_blender'] else None
+                blender = data.get('blender') if data['auto_blender'] else None
                 if data['auto_blender'] and not blender: return
-                self.tasks.end_edit(dict(name=data['name'] or Path(job['path']).stem,
+                name = data['name'] or Path(job['path']).stem
+                self.tasks.validate_names([name], ignore_id=row['id'])
+                if blender:
+                    self.remember_blender_settings(blender)
+                self.tasks.end_edit(dict(name=name,
                     options=asdict(data['options']), blender=blender, state=job['state'], error=''))
             else: self.tasks.end_edit()
         finally:
@@ -702,6 +859,9 @@ class MainWindow(QMainWindow):
         if self.busy: return
         if isinstance(ids, bool): ids = None
         if self.tasks.start(ids):
+            self.active_progress = None
+            self.phase_progress.hide(); self.progress_note.hide()
+            self.estimate_generation += 1
             self.started = time.perf_counter(); self.progress.setRange(0, 5); self.progress.setValue(0); self.state_label.setText('正在启动任务队列…'); self.rebuild_rows(); self.persist_tasks()
         else: QMessageBox.information(self, '没有待处理任务', '请添加新任务，或选择等待、失败、已停止的任务。')
 
@@ -753,8 +913,13 @@ class MainWindow(QMainWindow):
         name, ok = QInputDialog.getText(self, '重命名', '显示名称（不更改文件目录）', text=row['name'])
         if not ok or not name.strip(): return
         try:
+            if row['id'] in self.tasks.jobs:
+                self.tasks.validate_names([name.strip()], ignore_id=row['id'])
+            elif any(other['id'] != row['id'] and other['name'].casefold() == name.strip().casefold()
+                     for other in self.model.rows):
+                raise ValueError('任务名称已存在，请更换名称后再重命名。')
             if row.get('record'): self.library.rename(row['record'], name); row['record']['name'] = name.strip()
-            if row['id'] in self.tasks.jobs: self.tasks.jobs[row['id']]['name'] = name.strip(); self.persist_tasks()
+            if row['id'] in self.tasks.jobs: self.tasks.rename(row['id'], name.strip()); self.persist_tasks()
             self.rebuild_rows()
         except (OSError, ValueError) as error: self.show_error(error)
 
@@ -808,19 +973,52 @@ class MainWindow(QMainWindow):
     def open_task_logs(self): self.open_path(self.task_log_path())
 
     def choose_blender(self, opening=False, preferred=None, fps=None):
-        settings = dict(self.config)
-        if preferred: settings['blender_path'] = preferred
-        dialog = BlenderDialog(self, settings, fps or self.config.get('blender_fps', 30), opening)
-        if dialog.exec() != QDialog.DialogCode.Accepted: return None
-        chosen = dialog.result_data
-        self.config.update(blender_path=chosen['path'], blender_paths=chosen['paths'])
+        self.ensure_blender_versions()
+        if preferred and not any(record['path'].casefold() == str(preferred).casefold()
+                                 for record in self.blender_records):
+            try:
+                record = probe_blender(preferred)
+                self.blender_records.append(record)
+            except (OSError, ValueError):
+                pass
+        selected = next((record for record in self.blender_records
+                         if preferred and record['path'].casefold() == str(preferred).casefold()), None)
+        if selected is None:
+            selected = next((record for record in self.blender_records
+                             if record['path'].casefold() == str(self.config.get('blender_path', '')).casefold()), None)
+        if selected is None and self.blender_records:
+            selected = self.blender_records[0]
+        if selected is None:
+            raise FileNotFoundError('未检测到 Blender。请在设置中添加 blender.exe 后重试。')
+        chosen = dict(selected, fps=float(fps or self.config.get('blender_fps', 30)),
+                      as_mesh=self.config.get('blender_as_mesh', True),
+                      draw_points=self.config.get('blender_draw_points', True),
+                      suppress_warnings=self.config.get('blender_suppress_warnings', True),
+                      background_images=self.config.get('blender_background_images', True),
+                      point_radius=float(self.config.get('blender_point_radius', .005)),
+                      frame_start_offset=int(self.config.get('blender_frame_start_offset', 0)),
+                      paths=[record['path'] for record in self.blender_records])
         if not opening:
-            self.config.update(blender_as_mesh=chosen['as_mesh'], blender_draw_points=chosen['draw_points'],
-                blender_suppress_warnings=chosen['suppress_warnings'], blender_background_images=chosen['background_images'],
-                blender_point_radius=chosen['point_radius'], blender_point_size_revision=2, blender_fps=chosen['fps'])
-            self.blender_fps.setValue(chosen['fps'])
+            settings = {**self.config, 'blender_paths': chosen['paths'], '_blender_record': selected}
+            dialog = BlenderDialog(self, settings, fps=chosen['fps'])
+            if dialog.exec() != QDialog.DialogCode.Accepted:
+                return None
+            chosen = dialog.result_data
+        self.config.update(blender_path=chosen['path'], blender_paths=chosen['paths'],
+                           blender_records=self.blender_records)
+        if not opening:
+            self.remember_blender_settings(chosen)
         self.save_preferences()
         return chosen
+
+    def remember_blender_settings(self, settings):
+        self.config.update(blender_path=settings['path'], blender_paths=settings.get('paths', []),
+            blender_records=self.blender_records, blender_fps=settings['fps'],
+            blender_as_mesh=settings['as_mesh'], blender_draw_points=settings['draw_points'],
+            blender_suppress_warnings=settings['suppress_warnings'],
+            blender_background_images=settings['background_images'],
+            blender_point_radius=settings['point_radius'],
+            blender_frame_start_offset=settings.get('frame_start_offset', 0))
 
     def export_selected(self):
         row = self.selected()
@@ -838,6 +1036,7 @@ class MainWindow(QMainWindow):
         from blender_export import export_blender
         pipeline = Pipeline(Options(), self.events.put); self.export_pipeline = pipeline; self.exporting = True
         self.started = time.perf_counter(); self.progress.setRange(0, 0)
+        self.active_progress = None; self.phase_progress.hide(); self.progress_note.hide()
         self.state_label.setText('正在启动 Blender…'); self.update_busy(); self.update_details()
         def work():
             try:
@@ -924,15 +1123,81 @@ class MainWindow(QMainWindow):
             self.events.put(dict(type='environment', text=text))
         threading.Thread(target=work, daemon=True).start()
 
+    def cache_blender_versions(self):
+        if self.blender_discovery_running:
+            return
+        self.blender_discovery_running = True
+        settings = dict(self.config)
+        if not self.blender_records:
+            self.blender_cache_label.setText('正在扫描本机 Blender 版本…')
+        def work():
+            try:
+                self.blender_pending.put(discover_blenders(settings))
+            except Exception as error:
+                self.blender_pending.put(error)
+        threading.Thread(target=work, daemon=True).start()
+
+    def ensure_blender_versions(self):
+        """Use the startup cache; a first task may synchronously finish discovery."""
+        if self.blender_records:
+            return
+        try:
+            records = discover_blenders(dict(self.config))
+        except Exception:
+            records = []
+        if records:
+            self.blender_records = records
+            self.config.update(blender_records=records,
+                               blender_paths=[record['path'] for record in records],
+                               blender_path=records[0]['path'])
+            self.save_preferences()
+        elif self.blender_records:
+            self.blender_records = [record for record in self.blender_records
+                                    if Path(record['path']).is_file()]
+        if hasattr(self, 'blender_cache_label'):
+            self.blender_cache_label.setText(f'检测到 {len(self.blender_records)} 个 Blender 版本。'
+                                             if self.blender_records else '未检测到 Blender，请安装后重新扫描。')
+
     def poll(self):
         dirty = False; chunks = []
+        try:
+            blender_result = self.blender_pending.get_nowait()
+        except queue.Empty:
+            blender_result = None
+        if blender_result is not None:
+            self.blender_discovery_running = False
+            if isinstance(blender_result, list):
+                if blender_result:
+                    self.blender_records = blender_result
+                    preferred = self.config.get('blender_path')
+                    selected = next((r for r in blender_result
+                                     if r['path'].casefold() == str(preferred or '').casefold()), blender_result[0])
+                    self.config.update(blender_records=blender_result,
+                                       blender_paths=[r['path'] for r in blender_result],
+                                       blender_path=selected['path'])
+                    try: self.save_preferences()
+                    except OSError: pass
+                else:
+                    self.blender_records = [record for record in self.blender_records
+                                            if Path(record['path']).is_file()]
+                if hasattr(self, 'blender_cache_label'):
+                    self.blender_cache_label.setText(
+                        f'检测到 {len(self.blender_records)} 个 Blender 版本。'
+                        if self.blender_records else '未检测到 Blender，请安装后重新扫描。')
+            elif isinstance(blender_result, Exception):
+                chunks.append('[Blender 检测] ' + str(blender_result) + '\n')
+            if self.active_task_dialog:
+                self.active_task_dialog.set_blender_records(self.blender_records)
         deadline = time.perf_counter() + .012
         for _ in range(500):
             if time.perf_counter() >= deadline: break
             try: event = self.events.get_nowait()
             except queue.Empty: break
             kind, iid = event['type'], event.get('iid')
-            if kind == 'log': chunks.append(event['text'])
+            if kind == 'log':
+                chunks.append(event['text'])
+                if iid == self.active_progress_iid:
+                    self.progress_log_at = time.monotonic()
             elif kind == 'solver_warning':
                 job = self.tasks.snapshot().get(iid, {})
                 self.solver_notice_text.setText(f"求解提醒 · {job.get('name', 'GLOMap')}\n{event['text']}")
@@ -941,11 +1206,28 @@ class MainWindow(QMainWindow):
                 self.solver_notice.show()
                 self.persist_tasks(); dirty = True
             elif kind == 'stage':
-                self.state_label.setText(event['text'] + f" · 阶段 {event['index']}/{event['total']}")
-                self.progress.setRange(0, 5)
-                self.progress.setValue(event['index'] - 1)
+                if not self.active_progress or iid != self.active_progress_iid:
+                    self.state_label.setText(event['text'] + f" · 阶段 {event['index']}/{event['total']}")
+                    self.progress.setRange(0, 5)
+                    self.progress.setValue(event['index'] - 1)
                 with self.tasks.condition:
                     if iid in self.tasks.jobs: self.tasks.jobs[iid].update(stage=event['text'], progress=event['index'] - 1)
+                dirty = True
+            elif kind == 'task_progress':
+                previous_iid = self.active_progress_iid
+                self.active_progress, self.active_progress_iid = event, iid
+                self.progress_log_at = max(event['last_log'], self.progress_log_at if iid == previous_iid else 0)
+                detail = ' · ' + event['detail'] if event['detail'] else ''
+                self.state_label.setText(f"阶段 {event['step']}/{event['steps']} · {event['text']}{detail}")
+                self.progress.setRange(0, 1000); self.progress.setValue(round(event['overall'] * 1000))
+                self.progress.setToolTip('按流程阶段推进，不代表耗时百分比。')
+                fraction = event['fraction']
+                self.phase_progress.setRange(0, 0 if fraction is None else 1000)
+                if fraction is not None: self.phase_progress.setValue(round(fraction * 1000))
+                self.phase_progress.show(); self.progress_note.show()
+                with self.tasks.condition:
+                    if iid in self.tasks.jobs:
+                        self.tasks.jobs[iid].update(stage=event['text'] + detail, progress=event['overall'] * 5)
                 dirty = True
             elif kind == 'blender_progress':
                 self.state_label.setText(event['text'])
@@ -962,6 +1244,17 @@ class MainWindow(QMainWindow):
                 self.persist_tasks()
             elif kind == 'job':
                 dirty = True
+                if event.get('state') == '运行中':
+                    self.active_progress = None; self.active_progress_iid = iid
+                    self.progress_log_at = time.monotonic()
+                    self.phase_progress.hide(); self.progress_note.hide()
+                    self.estimate_label.setText('当前任务剩余时间将按阶段进度实时更新；此估时不含后续排队任务。')
+                    self.estimate_generation += 1
+                elif iid == self.active_progress_iid:
+                    self.active_progress = None; self.phase_progress.hide()
+                    if event.get('state') == '完成':
+                        self.progress.setRange(0, 1000); self.progress.setValue(1000)
+                    self.progress_note.setText(event.get('state', ''))
                 if 'result' in event:
                     result = event['result']; job = self.tasks.snapshot().get(iid, {})
                     report = result_report(result)
@@ -972,13 +1265,14 @@ class MainWindow(QMainWindow):
                     except (ValueError, OSError) as error: chunks.append(f'[项目名称保存失败] {error}\n')
                 self.persist_tasks()
             elif kind == 'complete':
-                self.progress.setRange(0, 5)
-                self.progress.setValue(5)
+                if not self.active_progress:
+                    self.progress.setRange(0, 5); self.progress.setValue(5)
                 metrics = event.get('metrics', {})
                 chunks.append(f"[完成] {metrics.get('registered_images', '?')} 注册帧 / {metrics.get('points', '?')} 点\n{event['model']}\n")
             elif kind in ('finished', 'export_finished'):
-                self.progress.setRange(0, 5)
+                self.active_progress = None; self.phase_progress.hide(); self.progress_note.hide()
                 if kind == 'export_finished':
+                    self.progress.setRange(0, 5)
                     self.exporting = False; self.export_pipeline = None
                     self.progress.setValue(5 if event.get('success') else 0)
                 self.state_label.setText(event['text']); self.persist_tasks(); self.refresh_projects(); self.schedule_estimate(); dirty = True
@@ -994,7 +1288,7 @@ class MainWindow(QMainWindow):
                 chunks.append(f"[Blender] 已保存 {event['output']}\n")
             elif kind == 'environment':
                 self.hardware_label.setText(event['text'][:140]); self.hardware_label.setToolTip(event['text']); self.environment_info.setText(event['text']); self.schedule_estimate()
-            elif kind == 'estimate' and event['generation'] == self.estimate_generation:
+            elif kind == 'estimate' and event['generation'] == self.estimate_generation and not self.busy:
                 self.estimate_label.setText(event['text']); self.estimate_label.setToolTip(event['text'])
             elif kind == 'queue_wait': self.update_busy()
             elif kind == 'cleanup_preview':
@@ -1003,6 +1297,9 @@ class MainWindow(QMainWindow):
         if dirty: self.rebuild_rows()
         if self.busy:
             elapsed = int(time.perf_counter() - self.started); self.elapsed_label.setText(f'{elapsed // 60:02}:{elapsed % 60:02}')
+            if self.active_progress:
+                note = live_remaining(self.active_progress, last_log=self.progress_log_at)
+                if self.progress_note.text() != note: self.progress_note.setText(note)
 
     def browse_default(self, key):
         control = self.default_controls[key]
@@ -1022,6 +1319,7 @@ class MainWindow(QMainWindow):
 
     def save_preferences(self):
         data = {**self.config, **asdict(self.defaults), 'distribution_root': str(ROOT)}
+        data['blender_records'] = self.blender_records
         for key in ('python', 'output_root'): data[key] = portable_path(data[key])
         data['backend_label'] = SOLVER_CHOICES[self.defaults.backend]
         data['camera_label'] = '近似针孔（无畸变）' if self.defaults.camera_mode == 'pinhole' else '自动估计畸变（默认）'
@@ -1031,8 +1329,13 @@ class MainWindow(QMainWindow):
     def save_settings_clicked(self):
         try:
             self.defaults = self.read_defaults()
-            self.config.update(blender_fps=self.blender_fps.value(), log_retention_days=self.retention.currentData())
-            self.save_preferences(); self.settings_note.setText('设置已保存，将用于之后添加的任务。'); self.refresh_projects()
+            self.config.update(blender_fps=self.blender_fps.value(),
+                               blender_frame_start_offset=self.blender_frame_start_offset.value(),
+                               log_retention_days=self.retention.currentData(),
+                               reuse_failed_projects=self.reuse_failed_projects.isChecked())
+            self.save_preferences()
+            self.tasks.reuse_failed_projects = self.reuse_failed_projects.isChecked()
+            self.settings_note.setText('设置已保存。目录复用策略用于下次启动的任务；默认处理参数用于之后添加的任务。'); self.refresh_projects()
         except (OSError, ValueError) as error: self.show_error(error)
 
     def reset_defaults(self):
@@ -1133,6 +1436,7 @@ def main():
 
 def configure_application(app):
     app.setApplicationName(APP_NAME); app.setApplicationVersion(APP_VERSION)
+    app.setWindowIcon(QIcon(str(ROOT / 'LOGO.ico')))
     # The offscreen test platform has no OS font discovery on Windows.
     if not QFontDatabase.families():
         for name in ('msyh.ttc', 'msyhbd.ttc', 'segoeui.ttf', 'consola.ttf'):

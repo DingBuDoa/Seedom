@@ -5,10 +5,11 @@ import threading
 import traceback
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from tracker_core import Options, Pipeline, Cancelled
 from estimate import save_sample
-from project_layout import result_directory, blend_filename
+from project_layout import result_directory, blend_filename, safe_name
 
 MOVABLE_STATES = ('等待', '排队', '失败', '已停止')
 
@@ -27,11 +28,14 @@ class TaskQueue:
         self.paused = False
         self.pending_ids = set()
         self.accepting = False
+        self.reuse_failed_projects = False
 
     def add(self, path, options, name=None, scene=False, auto_blender=False):
         from pathlib import Path
         iid = uuid.uuid4().hex
+        name = name or Path(path).stem
         with self.condition:
+            self.validate_names([name])
             self.jobs[iid] = dict(id=iid, path=str(Path(path).resolve()), name=name or Path(path).stem,
                                   scene=scene, options=asdict(options), state='等待', progress=0,
                                   auto_blender=auto_blender, created_at=datetime.now().isoformat(timespec='seconds'))
@@ -39,6 +43,29 @@ class TaskQueue:
                 self.jobs[iid]['state'] = '排队'
                 self.pending_ids.add(iid)
         return iid
+
+    @staticmethod
+    def _name_key(name):
+        return safe_name(name).casefold()
+
+    def validate_names(self, names, ignore_id=None):
+        """Reject duplicate display/project names before they enter the queue."""
+        keys = [self._name_key(name) for name in names]
+        if len(keys) != len(set(keys)):
+            raise ValueError('任务名称重复，请为每个任务设置不同的名称。')
+        with self.condition:
+            existing = {self._name_key(job['name']) for iid, job in self.jobs.items()
+                        if iid != ignore_id}
+        if any(key in existing for key in keys):
+            raise ValueError('任务名称已存在，请更换名称后再添加。')
+
+    def rename(self, iid, name):
+        with self.condition:
+            if iid not in self.jobs:
+                return False
+            self.validate_names([name], ignore_id=iid)
+            self.jobs[iid]['name'] = name
+            return True
 
     def snapshot(self):
         with self.condition:
@@ -120,13 +147,24 @@ class TaskQueue:
                 warnings = job['solver_warnings']
                 if not any(item['code'] == event['code'] for item in warnings):
                     warnings.append({field: event[field] for field in ('code', 'text', 'log_path')})
+            elif event['type'] == 'task_progress':
+                job.update(stage=event['text'] + (' · ' + event['detail'] if event['detail'] else ''),
+                           progress=event['overall'] * 5)
         self.emit({**event, 'iid': iid})
+        if event['type'] == 'blender_progress' and isinstance(self.pipeline, Pipeline):
+            self.pipeline.progress.begin('blender', event['text'], event['percent'], 100,
+                                         'blender', force=True)
 
     def _create_pipeline(self, iid, job):
         pipeline = self.pipeline_factory(Options(**job['options']), lambda event: self._pipeline_event(iid, event))
         pipeline.cancelled = self.cancelled
         pipeline.project_name = job['name']
         pipeline.project_dir = job.get('project_dir')
+        pipeline.reuse_failed_projects = self.reuse_failed_projects
+        if job.get('blender') and isinstance(pipeline, Pipeline):
+            from task_progress import stage_plan
+            pipeline.progress.plan = stage_plan(pipeline.options, blender=True)
+            pipeline.progress.positions = {key: i for i, (key, _) in enumerate(pipeline.progress.plan)}
         with self.condition:
             self.pipeline = pipeline
         return pipeline
@@ -167,6 +205,18 @@ class TaskQueue:
                     pipeline = self._create_pipeline(iid, job)
                     if self.cancelled.is_set():
                         raise Cancelled('任务已停止。')
+                    # Only the production queue performs this preflight. Test and
+                    # embedding pipeline factories may intentionally use virtual paths.
+                    source = Path(path)
+                    source_valid = source.is_dir() if scene else source.is_file()
+                    if self.pipeline_factory is Pipeline and not source_valid:
+                        message = f'源文件不存在，已跳过处理：{source}'
+                        self._diagnostic(pipeline, iid, '[源文件丢失] ' + message + '\n')
+                        with self.condition:
+                            job.update(state='失败', error=message)
+                        failed += 1
+                        self.emit({'type': 'job', 'iid': iid, 'state': '失败'})
+                        continue
                     result = pipeline.run(path, existing_scene=scene)
                     with self.condition:
                         job['result'] = result
@@ -177,12 +227,14 @@ class TaskQueue:
                         self.emit({'type': 'log', 'iid': iid, 'text': f'[耗时预估记录] {error}\n'})
                     blender = job.get('blender')
                     if blender:
-                        from pathlib import Path
                         from blender_export import export_blender
                         output = result_directory(result) / blend_filename(job['name'], blender['version'])
                         if output.exists():
                             output = output.with_stem(output.stem + '_' + uuid.uuid4().hex[:6])
-                        self.emit({'type': 'stage', 'iid': iid, 'index': 5, 'total': 5, 'text': '生成 Blender 场景'})
+                        if isinstance(pipeline, Pipeline):
+                            pipeline.emit('stage', index=5, total=5, text='生成 Blender 场景')
+                        else:
+                            self.emit({'type': 'stage', 'iid': iid, 'index': 5, 'total': 5, 'text': '生成 Blender 场景'})
                         try:
                             saved = export_blender(pipeline, result, output, blender)
                             self.emit({'type': 'blender_saved', 'model': result['model'], 'output': saved, 'blender': blender})

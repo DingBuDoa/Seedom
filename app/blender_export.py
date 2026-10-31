@@ -45,6 +45,7 @@ def export_blender(pipeline, result, output, settings):
         '--suppress-distortion-warnings', str(int(settings['suppress_warnings'])),
         '--background-images', str(int(settings['background_images'])),
         '--point-radius', str(settings['point_radius'])]
+    args += ['--frame-start-offset', str(int(settings.get('frame_start_offset', 0)))]
     if result.get('images_dir'):
         args += ['--images', result['images_dir']]
     import uuid

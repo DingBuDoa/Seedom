@@ -26,7 +26,8 @@ from project_library import ProjectLibrary
 from project_layout import create_project, safe_name, blend_filename
 from qt_app import MainWindow, configure_application
 from qt_dialogs import TaskDialog, BlenderDialog
-from PySide6.QtWidgets import QApplication, QDialog
+from PySide6.QtWidgets import QApplication, QDialog, QLabel
+from PySide6.QtGui import QColor
 from PySide6.QtCore import QTimer, Qt, QPoint
 from PySide6.QtTest import QTest
 
@@ -119,6 +120,18 @@ class QueueTests(unittest.TestCase):
         self.assertEqual(calls, ['a', 'c', 'd'])
         self.assertEqual(tasks.jobs[b]['state'], '等待')
         self.assertFalse(tasks.can_move([a], 1))
+
+    def test_duplicate_task_names_are_rejected_case_insensitively(self):
+        tasks = TaskQueue(lambda event: None, Pipeline, lambda result: None)
+        tasks.add('first.mp4', Options(), 'Scene')
+        with self.assertRaisesRegex(ValueError, '已存在'):
+            tasks.add('second.mp4', Options(), 'scene')
+        with self.assertRaisesRegex(ValueError, '重复'):
+            tasks.validate_names(['Batch · one', 'batch · ONE'])
+        with self.assertRaisesRegex(ValueError, '已存在'):
+            tasks.validate_names(['SCENE'])
+        tasks.validate_names(['Renamed'], ignore_id=next(iter(tasks.jobs)))
+        self.assertEqual(len(tasks.jobs), 1)
 
     def test_live_priority_pause_new_tasks_and_failure_continue_serially(self):
         entered = threading.Event(); release = threading.Event(); calls = []
@@ -255,7 +268,7 @@ class DesktopTests(unittest.TestCase):
             window.start_queue()
             wait_until(lambda: not window.tasks.running, app=self.app)
             wait_until(lambda: window.events.empty(), app=self.app)
-        self.assertTrue(window.solver_notice.isVisible())
+        self.assertFalse(window.solver_notice.isHidden())
         self.assertIn('回退到 CPU', window.solver_notice_text.text())
         self.assertIn('继续求解和导出', window.solver_notice_text.text())
         self.assertEqual(window.solver_notice_log, str(directory / '04-glomap.log'))
@@ -264,7 +277,7 @@ class DesktopTests(unittest.TestCase):
         self.assertIn('回退到 CPU', window.detail_info.text())
         self.assertEqual(window.selected()['state'], '完成')
         window.pages.setCurrentIndex(1); self.app.processEvents()
-        self.assertTrue(window.solver_notice.isVisible())
+        self.assertFalse(window.solver_notice.isHidden())
         window.solver_notice.hide()
         saved = json.loads((directory / 'task-queue.json').read_text(encoding='utf-8'))
         self.assertEqual(saved[0]['solver_warnings'][0]['code'], 'cpu_fallback')
@@ -273,7 +286,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(window.tasks.jobs[iid]['state'], '完成')
         self.assertFalse(window.tasks.jobs[iid]['result']['gpu_solver_active'])
         self.assertIn('回退到 CPU', window.detail_info.text())
-        self.assertIn('PointStudio', window.windowTitle())
+        self.assertIn('拾点VFX（SeedomVFX） 1.1.0', window.windowTitle())
 
     def test_blender_export_progress_responsive_completion_and_cancel(self):
         window = self.window; project = create_project(self.temp.name, '导出响应验证')
@@ -442,6 +455,142 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(dialog.result_data['options'].sequence_original)
         dialog.hide(); dialog.deleteLater()
 
+    def test_duplicate_task_name_stays_in_dialog_with_inline_error(self):
+        self.window.tasks.add(self.video, Options(), '已有任务')
+        dialog = TaskDialog(self.window, Options(), paths=[self.video],
+                            name_validator=self.window.tasks.validate_names)
+        dialog.show(); wait_until(lambda: bool(dialog.metadata), app=self.app)
+        dialog.name.setText('已有任务')
+        dialog.accept_task()
+        self.assertTrue(dialog.isVisible())
+        self.assertIsNone(dialog.result_data)
+        self.assertIn('名称已存在', dialog.error.text())
+        dialog.hide(); dialog.deleteLater()
+
+    def test_task_blender_area_exposes_full_export_settings_and_frame_offset(self):
+        record = {'path': 'C:/Blender/blender.exe', 'version': 'Blender 4.2.15'}
+        defaults = {'blender_frame_start_offset': 0, 'blender_as_mesh': True,
+                    'blender_draw_points': True, 'blender_background_images': True,
+                    'blender_suppress_warnings': True, 'blender_point_radius': .005,
+                    'blender_fps': 30}
+        dialog = TaskDialog(self.window, Options(), paths=[self.video],
+                            blender_records=[record],
+                            blender_settings=defaults)
+        self.assertTrue(dialog.blender_group.isHidden())
+        self.assertEqual(dialog.frame_start_offset.value(), 0)
+        self.assertEqual(dialog.blender_note.text(), '检测到 1 个 Blender 版本。')
+        dialog.blend.setChecked(True)
+        self.assertFalse(dialog.blender_group.isHidden())
+        self.assertEqual(dialog.blender_version.currentData(), record)
+        self.assertTrue(any('第 31 帧' in widget.text()
+                            for widget in dialog.blender_group.findChildren(QLabel)))
+        dialog.show()
+        wait_until(lambda: bool(dialog.metadata), app=self.app)
+        dialog.points.setChecked(False)
+        dialog.background.setChecked(False)
+        dialog.warnings.setChecked(False)
+        dialog.radius.setValue(.0123)
+        dialog.blender_fps.setValue(24)
+        dialog.frame_start_offset.setValue(30)
+        dialog.accept_task()
+        blender = dialog.result_data['blender']
+        self.assertEqual(blender['frame_start_offset'], 30)
+        self.assertEqual(blender['fps'], 24)
+        self.assertTrue(blender['as_mesh'])
+        self.assertFalse(blender['draw_points'])
+        self.assertFalse(blender['background_images'])
+        self.assertFalse(blender['suppress_warnings'])
+        self.assertEqual(blender['point_radius'], .0123)
+        self.assertEqual(dialog.result_data['blender']['path'], record['path'])
+        dialog.hide(); dialog.deleteLater()
+
+    def test_manual_blender_export_dialog_offers_the_same_scene_options(self):
+        record = {'path': 'C:/Blender/blender.exe', 'version': 'Blender 4.2.15'}
+        settings = {'_blender_record': record, 'blender_paths': [record['path']],
+                    'blender_as_mesh': True, 'blender_draw_points': True,
+                    'blender_background_images': True, 'blender_suppress_warnings': True,
+                    'blender_point_radius': .005, 'blender_frame_start_offset': 0}
+        dialog = BlenderDialog(self.window, settings, fps=30)
+        self.assertEqual(dialog.frame_start_offset.value(), 0)
+        dialog.points.setChecked(False)
+        dialog.background.setChecked(False)
+        dialog.radius.setValue(.02)
+        dialog.frame_start_offset.setValue(30)
+        dialog.accept_settings()
+        self.assertEqual(dialog.result_data['frame_start_offset'], 30)
+        self.assertFalse(dialog.result_data['draw_points'])
+        self.assertFalse(dialog.result_data['background_images'])
+        self.assertEqual(dialog.result_data['point_radius'], .02)
+        dialog.deleteLater()
+
+    def test_task_dialog_centers_on_parent_and_fits_available_screen(self):
+        dialog = TaskDialog(self.window, Options(), paths=[self.video])
+        dialog.show(); self.app.processEvents()
+        parent_center = self.window.frameGeometry().intersected(
+            dialog.screen().availableGeometry().adjusted(16, 16, -16, -16)).center()
+        dialog_center = dialog.frameGeometry().center()
+        self.assertLessEqual(abs(dialog_center.x() - parent_center.x()), 2)
+        self.assertLessEqual(abs(dialog_center.y() - parent_center.y()), 2)
+        self.assertLessEqual(dialog.width(), dialog.screen().availableGeometry().width() - 32)
+        self.assertLessEqual(dialog.height(), dialog.screen().availableGeometry().height() - 32)
+        dialog.grab().save(str(self.artifacts / 'task-dialog-centered.png'))
+        dialog.hide(); dialog.deleteLater()
+
+    def test_row_actions_remain_pinned_when_table_scrolls_horizontally(self):
+        window = self.window
+        window.resize(1020, 680); window.show(); self.app.processEvents()
+        iid = window.tasks.add(self.video, Options(), '右侧工具滚动测试')
+        for number in range(12):
+            window.tasks.add(self.video, Options(), f'纵向滚动测试 {number + 1}')
+        window.rebuild_rows(); window.table.selectRow(0)
+        for column, width in enumerate((300, 240, 240, 180, 180, 220, 142)):
+            window.table.setColumnWidth(column, width)
+        self.app.processEvents()
+        overlay = window.sticky_actions
+        bar = window.table.horizontalScrollBar()
+        bar.setValue(bar.maximum())
+        self.app.processEvents()
+        self.assertTrue(overlay.isVisible())
+        self.assertEqual(overlay.width(), overlay.WIDTH)
+        self.assertEqual(overlay.geometry().left(), window.table.geometry().right() + 1)
+        self.assertEqual(window.table_vscroll.geometry().left(), overlay.geometry().right() + 1)
+        self.assertEqual(window.table_vscroll.geometry().right(), window.table_area.width() - 1)
+        self.assertGreater(bar.maximum(), 0)
+        self.assertFalse(window.table.isColumnHidden(1))
+        self.assertFalse(window.table.isColumnHidden(4))
+        self.assertGreater(window.table.verticalScrollBar().maximum(), 0)
+        self.assertFalse(window.table.verticalScrollBar().isVisible())
+        self.assertTrue(window.table_vscroll.isVisible())
+        self.assertGreater(window.table_vscroll.maximum(), 0)
+        self.assertEqual(window.table_vscroll.pageStep(), window.table.verticalScrollBar().pageStep())
+        status_left = window.table.horizontalHeader().sectionViewportPosition(5)
+        self.assertGreaterEqual(status_left, 0)
+        self.assertLessEqual(status_left + window.table.columnWidth(5), window.table.viewport().width())
+        window.grab().save(str(self.artifacts / 'workspace-min-horizontal-scroll.png'))
+
+    def test_selected_row_highlight_fills_gap_before_pinned_actions(self):
+        window = self.window
+        window.resize(1500, 800); self.app.processEvents()
+        window.tasks.add(self.video, Options(), '整行高亮测试')
+        window.rebuild_rows()
+        table = window.table
+        window.table.selectRow(0)
+        self.app.processEvents()
+        row_y = table.rowViewportPosition(0) + table.rowHeight(0) // 2
+        action_y = window.sticky_actions.row_rect(0).center().y()
+        header_bottom = table.horizontalHeader().mapTo(
+            window.table_area, QPoint(0, table.horizontalHeader().height())).y()
+        self.assertGreaterEqual(window.sticky_actions.row_rect(0).top(), header_bottom)
+        viewport_image = table.viewport().grab().toImage()
+        action_image = window.sticky_actions.grab().toImage()
+        self.assertEqual(QColor(viewport_image.pixel(table.viewport().width() - 4, row_y)), QColor('#eaf0ff'))
+        self.assertEqual(QColor(action_image.pixel(window.sticky_actions.width() - 4, action_y)), QColor('#eaf0ff'))
+        table.clearSelection(); self.app.processEvents()
+        viewport_image = table.viewport().grab().toImage()
+        action_image = window.sticky_actions.grab().toImage()
+        self.assertEqual(QColor(viewport_image.pixel(table.viewport().width() - 4, row_y)), QColor('#ffffff'))
+        self.assertEqual(QColor(action_image.pixel(window.sticky_actions.width() - 4, action_y)), QColor('#ffffff'))
+
     def test_unified_history_filters_persistence_and_responsive_ui(self):
         records, _ = ProjectLibrary().scan(str(ROOT / 'outputs'))
         self.window.records = {r['id']: r for r in records}
@@ -488,10 +637,9 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.window.sort_box.currentText(), '最早创建')
         self.assertEqual(self.window.proxy.index(0, 0).data(Qt.ItemDataRole.UserRole)['id'], first)
         self.window.sort_box.setCurrentIndex(self.window.sort_box.findText('最新创建'))
-        index = self.window.proxy.index(0, 6)
-        rect = self.window.table.visualRect(index)
-        point = QPoint(rect.left() + 6 + 4 * 26 + 13, rect.center().y())
-        QTest.mouseClick(self.window.table.viewport(), Qt.MouseButton.LeftButton, pos=point)
+        point = QPoint(6 + 4 * 26 + 13,
+                       self.window.sticky_actions.row_rect(0).center().y())
+        QTest.mouseClick(self.window.sticky_actions, Qt.MouseButton.LeftButton, pos=point)
         self.app.processEvents()
         self.assertNotIn(second, self.window.tasks.jobs)
         self.assertIn(first, self.window.tasks.jobs)
@@ -538,7 +686,7 @@ class DesktopTests(unittest.TestCase):
     def test_column_boundary_tracks_mouse_in_both_directions(self):
         header = self.window.table.horizontalHeader()
         self.app.processEvents()
-        for section in (1, 2, 3, 4, 5):
+        for section in (1, 2, 3, 4):
             for delta in (35, -20):
                 original_name_width = header.sectionSize(0)
                 original_width = header.sectionSize(section)
@@ -563,7 +711,7 @@ class DesktopTests(unittest.TestCase):
         chosen_settings_width = header.sectionSize(2)
         self.assertEqual(chosen_name_width, original_name_width + 45)
 
-    def test_window_resize_refits_after_manual_column_drag(self):
+    def test_window_resize_keeps_left_columns_anchored_and_stretches_status(self):
         table = self.window.table; header = table.horizontalHeader()
         for number in range(24):
             self.window.tasks.add(self.video, Options(), f'窗口缩放测试 {number + 1}')
@@ -577,18 +725,19 @@ class DesktopTests(unittest.TestCase):
             QTest.mouseRelease(header.viewport(), Qt.MouseButton.LeftButton, pos=end)
             self.app.processEvents()
             self.assertEqual(header.sectionSize(section), original + delta)
-        chosen_settings_width = header.sectionSize(2)
+        fixed_widths = [header.sectionSize(section) for section in range(5)]
 
         def assert_fitted():
             self.app.processEvents()
-            used = sum(table.columnWidth(column) for column in range(1, self.window.model.columnCount())
-                       if not table.isColumnHidden(column))
-            self.assertEqual(table.columnWidth(0), max(220, table.viewport().width() - used))
-            self.assertEqual(header.sectionSize(2), chosen_settings_width)
-            self.assertEqual(header.sectionSize(6), 142)
-            if table.viewport().width() >= used + 220:
+            self.assertEqual([header.sectionSize(section) for section in range(5)], fixed_widths)
+            self.assertTrue(table.isColumnHidden(6))
+            used = sum(fixed_widths)
+            if table.viewport().width() >= used + header.minimumSectionSize():
                 self.assertEqual(header.length(), table.viewport().width())
                 self.assertEqual(table.horizontalScrollBar().maximum(), 0)
+                self.assertGreaterEqual(header.sectionSize(5), header.minimumSectionSize())
+            else:
+                self.assertGreater(table.horizontalScrollBar().maximum(), 0)
 
         for width in (1550, 1700, 1200, 1190, 1020, 1360):
             self.window.resize(width, 800); self.app.processEvents()

@@ -1,0 +1,29 @@
+{
+  "revision": "bounded-convergence-v1",
+  "profiles": {
+    "high": {
+      "title": "高 · 更充分优化",
+      "max_iterations": 30000,
+      "max_seconds": 180,
+      "epipolar_seconds": 1200,
+      "relative_tolerance": 0.0001,
+      "patience": 1000
+    },
+    "balanced": {
+      "title": "中 · 平衡速度与精度",
+      "max_iterations": 15000,
+      "max_seconds": 90,
+      "epipolar_seconds": 600,
+      "relative_tolerance": 0.0005,
+      "patience": 500
+    },
+    "fast": {
+      "title": "低 · 更快结束",
+      "max_iterations": 5000,
+      "max_seconds": 45,
+      "epipolar_seconds": 240,
+      "relative_tolerance": 0.002,
+      "patience": 250
+    }
+  }
+}

@@ -66,11 +66,21 @@ def main():
     import torch
     import fastmap.color
     from fastmap.memory_policy import configure_cuda
+    from fastmap.timer import Timer
+    from fastmap.container import PointPairs
+    from fastmap_progress import install_progress_reporting
+    install_progress_reporting(Timer, PointPairs)
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--database', required=True)
     parser.add_argument('--output_dir', required=True)
-    args, _ = parser.parse_known_args()
+    from fastmap.optimization import configure, PROFILES
+    parser.add_argument('--solver-quality', choices=PROFILES, default='balanced')
+    args, remaining = parser.parse_known_args()
+    optimization_policy = configure(args.solver_quality)
+    # Strip adapter-only arguments before the upstream argparse entry point.
+    sys.argv = [str(FASTMAP / 'run.py'), *remaining, '--database', args.database, '--output_dir', args.output_dir]
+    print('[OPTIMIZATION_POLICY] ' + json.dumps(optimization_policy), flush=True)
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA-enabled PyTorch cannot access the GPU.')
     workers = max(1, min(2, int(os.environ.get('AUTOTRACKER_COLOR_WORKERS', '1'))))
@@ -89,6 +99,7 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     started = time.perf_counter()
     runpy.run_path(str(FASTMAP / 'run.py'), run_name='__main__')
+    (Path(args.output_dir) / 'optimization-policy.json').write_text(json.dumps(optimization_policy, indent=2), encoding='utf-8')
     (Path(args.output_dir) / 'memory-policy.json').write_text(json.dumps(policy, indent=2), encoding='utf-8')
     complete_observations(args.database, Path(args.output_dir) / 'sparse/0')
     torch.cuda.synchronize()

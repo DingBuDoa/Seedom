@@ -36,6 +36,14 @@ def restore_jobs(path, previous_root=None):
             for key in ('python', 'output_root'):
                 setattr(options, key, str(saved_path(getattr(options, key), previous_root)))
             job['options'] = asdict(options)
+            blender = job.get('blender')
+            if blender is not None:
+                if not isinstance(blender, dict):
+                    raise ValueError('无效的 Blender 导出设置')
+                blender.pop('keyframe_interval', None)
+                blender.setdefault('frame_start_offset', 0)
+                if type(blender['frame_start_offset']) is not int or not 0 <= blender['frame_start_offset'] <= 10000:
+                    raise ValueError('无效的 Blender 导出起始帧偏移')
             job.setdefault('scene', False)
             if type(job['scene']) is not bool:
                 raise ValueError('无效的场景标记')

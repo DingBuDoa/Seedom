@@ -479,6 +479,52 @@ class PointPairs:
     def num_point_pairs(self):
         return self.point_idx1.shape[0]
 
+    def index_batches(self, mask=None, batch_size=65536, randomize=False,
+                      infinite=False, drop_last=False):
+        """Scan masks in bounded windows; never expand a scene-wide nonzero list.
+
+        Pack selected indices across windows so drop_last applies to the query,
+        rather than to each window. Explicit random queries retain permutation
+        semantics and necessarily require a query-wide ordering buffer.
+        """
+        batch_size = min(batch_size, current_limit('sparse_batch', self.device))
+        if batch_size < 1:
+            raise ValueError('Point-pair batch size must be positive')
+        if mask is not None and (mask.dtype != torch.bool or
+                                 mask.shape != (self.num_point_pairs,)):
+            raise ValueError('Invalid point-pair mask')
+        while True:
+            pending = None
+            if randomize:
+                order = (torch.arange(self.num_point_pairs, device=self.device)
+                         if mask is None else mask.nonzero().flatten())
+                order = order[torch.randperm(len(order), device=self.device)]
+                windows = (order[i:i + batch_size]
+                           for i in range(0, len(order), batch_size))
+            else:
+                def scan():
+                    for start in range(0, self.num_point_pairs, batch_size):
+                        end = min(start + batch_size, self.num_point_pairs)
+                        if mask is None:
+                            yield torch.arange(start, end, device=self.device)
+                        else:
+                            yield mask[start:end].nonzero().flatten() + start
+                windows = scan()
+            yielded = False
+            for indices in windows:
+                if pending is not None:
+                    indices = torch.cat((pending, indices))
+                if len(indices) >= batch_size:
+                    yield indices[:batch_size]
+                    yielded = True
+                    indices = indices[batch_size:]
+                pending = indices if len(indices) else None
+            if pending is not None and not drop_last:
+                yield pending
+                yielded = True
+            if not infinite or not yielded:
+                break
+
     @torch.no_grad()
     def query(
         self,
@@ -498,75 +544,37 @@ class PointPairs:
         Yields:
             point_pairs_data: PointPairsData container
         """
-        # if point_pair_mask is None, query all point pairs
-        if point_pair_mask is None:
-            point_pair_mask = torch.ones(
-                self.num_point_pairs, dtype=torch.bool, device=self.device
-            )  # (num_point_pairs,)
+        for point_pair_idx in self.index_batches(
+            point_pair_mask, batch_size, randomize, infinite, drop_last
+        ):
+            # get data for the batch
+            point_idx1 = self.point_idx1[point_pair_idx]  # (B,)
+            point_idx2 = self.point_idx2[point_pair_idx]  # (B,)
+            image_idx1 = self.image_idx[point_idx1]  # (B,)
+            image_idx2 = self.image_idx[point_idx2]  # (B,)
+            keypoint_idx1 = self.keypoint_idx[point_idx1]  # (B,)
+            keypoint_idx2 = self.keypoint_idx[point_idx2]  # (B,)
+            xy1_pixels = self.xy_pixels[point_idx1]  # (B, 2)
+            xy2_pixels = self.xy_pixels[point_idx2]  # (B, 2)
+            xy1 = self.xy[point_idx1]  # (B, 2)
+            xy2 = self.xy[point_idx2]  # (B, 2)
+            track_idx = self.track_idx[point_idx1]  # (B,)
+            assert torch.all(track_idx == self.track_idx[point_idx2])
+            del point_idx1, point_idx2
 
-        # get the point pair idx
-        query_point_pair_idx = point_pair_mask.nonzero(as_tuple=False).squeeze(
-            1
-        )  # (num_point_pairs,)
-        num_query_point_pairs = len(query_point_pair_idx)
-        del point_pair_mask
-
-        # set the number of epochs
-        if infinite:
-            num_epochs = 10000000000000
-        else:
-            num_epochs = 1
-
-        for epoch_idx in range(num_epochs):
-            # randomize the order of point pairs
-            if randomize:
-                query_point_pair_idx = query_point_pair_idx[
-                    torch.randperm(num_query_point_pairs)
-                ]  # (num_point_pairs,)
-
-            # get the number of point pair batches
-            num_batches = (num_query_point_pairs + batch_size - 1) // batch_size
-
-            # loop
-            for i in range(num_batches):
-                # get the batch of point pair idx
-                start_idx = i * batch_size
-                end_idx = min(start_idx + batch_size, num_query_point_pairs)
-                point_pair_idx = query_point_pair_idx[start_idx:end_idx]  # (B,)
-                del start_idx, end_idx
-
-                # drop last batch if it is not full
-                if drop_last and point_pair_idx.shape[0] < batch_size:
-                    break
-
-                # get data for the batch
-                point_idx1 = self.point_idx1[point_pair_idx]  # (B,)
-                point_idx2 = self.point_idx2[point_pair_idx]  # (B,)
-                image_idx1 = self.image_idx[point_idx1]  # (B,)
-                image_idx2 = self.image_idx[point_idx2]  # (B,)
-                keypoint_idx1 = self.keypoint_idx[point_idx1]  # (B,)
-                keypoint_idx2 = self.keypoint_idx[point_idx2]  # (B,)
-                xy1_pixels = self.xy_pixels[point_idx1]  # (B, 2)
-                xy2_pixels = self.xy_pixels[point_idx2]  # (B, 2)
-                xy1 = self.xy[point_idx1]  # (B, 2)
-                xy2 = self.xy[point_idx2]  # (B, 2)
-                track_idx = self.track_idx[point_idx1]  # (B,)
-                assert torch.all(track_idx == self.track_idx[point_idx2])
-                del point_idx1, point_idx2
-
-                # yield
-                yield PointPairsData(
-                    point_pair_idx=point_pair_idx,
-                    xy1_pixels=xy1_pixels,
-                    xy2_pixels=xy2_pixels,
-                    xy1=xy1,
-                    xy2=xy2,
-                    image_idx1=image_idx1,
-                    image_idx2=image_idx2,
-                    keypoint_idx1=keypoint_idx1,
-                    keypoint_idx2=keypoint_idx2,
-                    track_idx=track_idx,
-                )
+            # yield
+            yield PointPairsData(
+                point_pair_idx=point_pair_idx,
+                xy1_pixels=xy1_pixels,
+                xy2_pixels=xy2_pixels,
+                xy1=xy1,
+                xy2=xy2,
+                image_idx1=image_idx1,
+                image_idx2=image_idx2,
+                keypoint_idx1=keypoint_idx1,
+                keypoint_idx2=keypoint_idx2,
+                track_idx=track_idx,
+            )
 
 
 @dataclass

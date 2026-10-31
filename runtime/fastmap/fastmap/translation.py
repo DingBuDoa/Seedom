@@ -162,13 +162,14 @@ def loop(
 
     # convergence manager
     convergence_manager = ConvergenceManager(
-        warmup_steps=10, decay=0.99, convergence_window=500
+        warmup_steps=10, decay=0.99, convergence_window=500,
+        parameters=params.parameters(), stage='translation',
     )
     convergence_manager.start()
 
     with torch.enable_grad():
         # loop for optimization
-        for iter_idx in range(1000000):
+        for iter_idx in range(convergence_manager.max_steps):
             # forward
             t_c2w = params()  # (num_init, num_images, 3)
             o1 = torch.index_select(
@@ -180,6 +181,10 @@ def loop(
 
             # compute gradients
             loss, d_o1, d_o2 = compute_gradients(o1=o1, o2=o2, o12_gt=o12_gt)
+            moving_loss, finished = convergence_manager.step(iter_idx, loss)
+            if finished:
+                logger.info(f"Translation stopped: {convergence_manager.reason}; best loss {convergence_manager.best_loss:.8g}")
+                break
 
             # backward to parameters
             optimizer.zero_grad()
@@ -192,22 +197,13 @@ def loop(
             # gradient step
             optimizer.step()
 
-            # check convergence
-            moving_loss, if_converged = convergence_manager.step(
-                step=iter_idx, loss=loss
-            )
-            if if_converged:
-                logger.info(
-                    f"Converged at iter {iter_idx} with moving loss {moving_loss:.6f}"
-                )
-                break
-
             if iter_idx % log_interval == 0:
                 logger.info(
                     f"[Iter {iter_idx}] loss={loss.item():.6f}, moving_loss={moving_loss:.6f}"
                 )
 
     ##### Return the optimized parameters #####
+    convergence_manager.restore_best()
     t_c2w = params()
     t_w2c = torch.einsum("nij,mnj->mni", R_w2c, -t_c2w)  # (num_init, num_images, 3)
     return t_w2c

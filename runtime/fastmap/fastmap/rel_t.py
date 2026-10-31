@@ -8,6 +8,7 @@ from fastmap.point_pair import (
     cheirality_check,
     compute_epipolar_error,
     compute_ray_angle,
+    image_pair_index,
 )
 from fastmap.utils import to_homogeneous
 
@@ -201,7 +202,7 @@ def _voting_level(
     ##### Get some information #####
     num_image_pairs = R.shape[0]
     num_candidates = candidates.shape[0]
-    num_point_pairs = point_pairs.point_idx1.shape[0]
+    num_point_pairs = point_pairs.num_point_pairs
     dtype = R.dtype
     device = R.device
 
@@ -245,7 +246,7 @@ def _voting_level(
         assert torch.all(batch_data.image_idx1 < batch_data.image_idx2)
 
         # get data for the batch
-        batch_image_pair_idx = image_pair_idx[batch_data.point_pair_idx]  # (B,)
+        batch_image_pair_idx = image_pair_idx[batch_data.point_pair_idx].long()  # (B,)
         batch_R = R[batch_image_pair_idx]  # (B, 3, 3)
         batch_candidates = candidates[batch_image_pair_idx]  # (B, num_candidates, 3)
 
@@ -344,14 +345,14 @@ def _voting(
         theta_max *= 0.5
 
     ##### Disambiguate the sign #####
-    t = _disambiguate_sign(
-        R=R,
-        t=t,
-        xy1=point_pairs.xy[point_pairs.point_idx1],
-        xy2=point_pairs.xy[point_pairs.point_idx2],
-        image_pair_idx=image_pair_idx,
-        point_pair_mask=point_pair_mask,
-    )  ## (num_image_pairs, 3)
+    positive = torch.zeros(num_image_pairs, device=device, dtype=torch.long)
+    total = torch.zeros_like(positive)
+    for batch in point_pairs.query(point_pair_mask):
+        idx = image_pair_idx[batch.point_pair_idx].long()
+        good = cheirality_check(batch.xy1, batch.xy2, R[idx], t[idx])
+        positive.scatter_add_(0, idx, good.long())
+        total.scatter_add_(0, idx, torch.ones_like(idx))
+    t = torch.where((2 * positive > total)[:, None], t, -t)
 
     ##### Return #####
     return t
@@ -390,37 +391,8 @@ def re_estimate_relative_t(
     device = R_w2c.device
     image_mask = images.mask.clone()  # (num_images,)
 
-    ##### Find the image pairs with a non-empty set of inliers #####
-    # initialize the mask of image pairs
-    non_empty_mask = torch.zeros(
-        num_images, num_images, device=device, dtype=torch.bool
-    )  # (num_images, num_images)
-
-    # set the mask
-    for batch_data in point_pairs.query():
-        # make sure the first image index is smaller than the second
-        assert torch.all(batch_data.image_idx1 < batch_data.image_idx2)
-
-        # set the mask
-        non_empty_mask[batch_data.image_idx1, batch_data.image_idx2] = True
-
-    # get the image idx 1 and image index 2 for all pairs with a non-empty set of inliers
-    image_idx1, image_idx2 = non_empty_mask.nonzero(
-        as_tuple=True
-    )  # (num_image_pairs,), (num_image_pairs,)
-
-    # get the image pair idx for all point pairs
-    image_pair_idx = (non_empty_mask.flatten().long().cumsum(0) - 1).reshape(
-        num_images, num_images
-    )  # (num_images, num_images)
-    del non_empty_mask
-    image_pair_idx = image_pair_idx[
-        point_pairs.image_idx[point_pairs.point_idx1],
-        point_pairs.image_idx[point_pairs.point_idx2],
-    ]  # (num_point_pairs,)
-
-    # get the number of image pairs
-    num_image_pairs = image_idx1.shape[0]
+    image_idx1, image_idx2, image_pair_idx = image_pair_index(point_pairs, num_images)
+    num_image_pairs = len(image_idx1)
 
     ##### Compute relative rotation matrix #####
     R = R_w2c[image_idx2] @ R_w2c[image_idx1].transpose(
@@ -429,14 +401,12 @@ def re_estimate_relative_t(
 
     ##### Voting #####
     # do not consider the point pairs that have almost parallel rays
-    nonparallel_ray_mask = (
-        compute_ray_angle(
-            xy1=point_pairs.xy[point_pairs.point_idx1],
-            xy2=point_pairs.xy[point_pairs.point_idx2],
-            R=R[image_pair_idx],
-        )
-        > ray_angle_thr
-    )  # (num_point_pairs,)
+    nonparallel_ray_mask = torch.empty(point_pairs.num_point_pairs, device=device, dtype=torch.bool)
+    for batch in point_pairs.query():
+        idx = image_pair_idx[batch.point_pair_idx].long()
+        nonparallel_ray_mask[batch.point_pair_idx] = compute_ray_angle(
+            batch.xy1, batch.xy2, R[idx]) > ray_angle_thr
+    logger.info(f"Nonparallel point pairs for voting: {nonparallel_ray_mask.sum().item()} / {point_pairs.num_point_pairs}")
 
     # vote
     t = _voting(
@@ -449,57 +419,18 @@ def re_estimate_relative_t(
     )  # (num_image_pairs, 3)
     del nonparallel_ray_mask
 
-    ##### Compute all kinds of masks #####
-    # epipolar error
-    low_error_mask = (
-        compute_epipolar_error(
-            xy1=point_pairs.xy[point_pairs.point_idx1],
-            xy2=point_pairs.xy[point_pairs.point_idx2],
-            R=R[image_pair_idx],
-            t=t[image_pair_idx],
-        )
-        < epipolar_error_thr
-    )  # (num_point_pairs,)
-
-    # cheirality
-    cheirality_mask = cheirality_check(
-        xy1=point_pairs.xy[point_pairs.point_idx1],
-        xy2=point_pairs.xy[point_pairs.point_idx2],
-        R=R[image_pair_idx],
-        t=t[image_pair_idx],
-    )
-
-    # ray angle
-    small_ray_angle_mask = (
-        compute_ray_angle(
-            R=R[image_pair_idx],
-            xy1=point_pairs.xy[point_pairs.point_idx1],
-            xy2=point_pairs.xy[point_pairs.point_idx2],
-        )
-        < ray_angle_thr
-    )  # (num_point_pairs,)
-
-    # inlier mask
-    inlier_mask = low_error_mask & (
-        cheirality_mask | small_ray_angle_mask
-    )  # (num_point_pairs,)
-
-    # the mask of point pairs supporting the estimation of t
-    support_mask = (
-        low_error_mask & (~small_ray_angle_mask) & cheirality_mask
-    )  # (num_point_pairs,)
-
-    # prevent misuse
-    del low_error_mask, cheirality_mask, small_ray_angle_mask
-
-    ##### Compute valid mask for image pairs #####
-    support_count = torch.zeros(
-        num_image_pairs, device=device, dtype=torch.long
-    )  # (num_image_pairs,)
-    support_count.scatter_reduce_(
-        dim=0, index=image_pair_idx, src=support_mask.long(), reduce="sum"
-    )  # (num_image_pairs,)
-    valid_mask = support_count >= min_num_inliers  # (num_image_pairs,)
+    # Evaluate geometry and accumulate support with bounded temporaries.
+    inlier_mask = torch.empty(point_pairs.num_point_pairs, device=device, dtype=torch.bool)
+    support_count = torch.zeros(num_image_pairs, device=device, dtype=torch.long)
+    for batch in point_pairs.query():
+        idx = image_pair_idx[batch.point_pair_idx].long()
+        batch_R, batch_t = R[idx], t[idx]
+        low = compute_epipolar_error(batch.xy1, batch.xy2, batch_R, batch_t) < epipolar_error_thr
+        front = cheirality_check(batch.xy1, batch.xy2, batch_R, batch_t)
+        small = compute_ray_angle(batch.xy1, batch.xy2, batch_R) < ray_angle_thr
+        inlier_mask[batch.point_pair_idx] = low & (front | small)
+        support_count.scatter_add_(0, idx, (low & ~small & front).long())
+    valid_mask = support_count >= min_num_inliers
     del support_count
 
     ##### Iteratively prune image pairs with too few connections #####
@@ -567,16 +498,12 @@ def re_estimate_relative_t(
         f"Number of valid images after pruning: {image_mask.long().sum().item()} out of {num_images}"
     )
 
-    ##### Eliminate all point pairs not in valid image pairs #####
-    inlier_mask &= valid_mask[image_pair_idx]  # (num_point_pairs,)
-
-    ##### Count the number of inliers #####
-    inlier_count = torch.zeros(
-        num_image_pairs, device=device, dtype=torch.long
-    )  # (num_image_pairs,)
-    inlier_count.scatter_reduce_(
-        dim=0, index=image_pair_idx, src=inlier_mask.long(), reduce="sum"
-    )  # (num_image_pairs,)
+    inlier_count = torch.zeros(num_image_pairs, device=device, dtype=torch.long)
+    for indices in point_pairs.index_batches():
+        idx = image_pair_idx[indices].long()
+        selected = inlier_mask[indices] & valid_mask[idx]
+        inlier_mask[indices] = selected
+        inlier_count.scatter_add_(0, idx, selected.long())
 
     ##### Build ImagePairs container #####
     image_pairs = ImagePairs(

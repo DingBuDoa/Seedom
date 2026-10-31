@@ -1,7 +1,8 @@
 """Release metadata and the upstream projects included in this distribution."""
-APP_NAME = 'PointStudio'
-APP_VERSION = '1.0.1'
-BUILD_DATE = '2026-10-24'
+APP_NAME = '拾点VFX（SeedomVFX）'
+APP_VERSION = '1.1.0'
+BUILD_DATE = '2026-10-31'
+PROJECT_URL = 'https://github.com/DingBuDoa/Seedom'
 SOLVER_CHOICES = {'fastmap': 'FastMap-更高速度', 'glomap': 'GLOMap-更高精度'}
 
 # Versions checked against bundled source/package metadata and executable help.

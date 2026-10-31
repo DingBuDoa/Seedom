@@ -1,83 +1,61 @@
-<div align="center">
-
 # 拾点VFX（SeedomVFX）
 
-**从视频到相机轨迹、彩色点云与 Blender 工程**
+软件版本 **1.1.0** · 构建日期 **2026-10-31**。
 
-Windows 桌面工具 · PySide6 / Qt 6 · **v1.0.1** · 2026-10-24
+项目主页：[Seedom](https://github.com/DingBuDoa/Seedom)
 
-[下载 v1.0.1](https://github.com/DingBuDoa/Seedom/releases/tag/v1.0.1) · [使用指南](#开始使用) · [源码开发](docs/DEVELOPMENT.md) · [更新记录](CHANGELOG.md) · [第三方项目](THIRD_PARTY_NOTICES.md)
+拾点VFX 从视频提取相机轨迹与彩色点云，生成可继续创作的 Blender 工程。Windows 桌面版使用 PySide6 / Qt；求解、任务队列、项目缓存和导出均在本机运行。
 
-</div>
+## 1.1.0
 
-![PointStudio 任务界面（演示任务）](docs/images/workspace.png)
-## 可以通过一条视频求解摄像机运动轨迹并绘制三维点云场景
-## 功能
-- **便捷生成点云**：仅需一条视频，纯本地计算，即可在短时间内获得点云文件
-- **自动任务队列**：独立任务参数、上下箭头调整优先级、暂停后续任务、停止当前任务与失败重试。
-- **两种求解方案**：**FastMap-更高速度 / GLOMap-更高精度**，使用 COLMAP 提取特征与匹配图像。FastMap 通过一阶优化器替代传统二阶优化，并结合分块显存管理与 GPU 并行，降低全局 SfM 的求解开销；在典型短片端到端流程中，相比此前约 3 小时的 CPU 解算，可缩短至约 10–20 分钟，**最高约 18 倍**（3 小时 → 10 分钟），实际倍率取决于帧数、分辨率、显卡与匹配策略。
-- **Blender 导出**：相机关键帧、原生彩色点云与同步视频背景；支持选择 Blender 版本并在后台生成工程。
-- **项目与日志**：搜索、筛选、结果目录、诊断日志、历史记录及项目回收目录。
-- **GPU 状态提示**：GLOMap 回退 CPU 时提示原因
+- 软件名称更新为 **拾点VFX（SeedomVFX）**，版本更新为 **1.1.0**。
+- Blender 导出设置包含点云显示/网格、背景、畸变警告、点半径、帧率和起始帧偏移。偏移默认 `0`，轨迹从第 1 帧开始；设为 `N` 时，相机轨迹和背景合成从第 `N+1` 帧开始，后续关键帧仍逐帧连续。
+- 启动时在后台扫描并缓存本机 Blender 版本；添加或编辑任务时直接从任务底部的 Blender 区域选择版本，不再弹出单独的版本选择窗口。未勾选自动生成 Blender 文件时，该区域折叠。
+- 队列开始处理前检查源视频或场景路径。源文件已丢失时，将该任务标记为失败并跳过，队列继续执行后续任务。
+- 加强队列开始按钮的颜色和尺寸，帮助快速辨认主要操作。
+- 将任务表格操作按钮固定在表格右侧，横向滚动任务信息时按钮保持可见。
 
-## 环境要求
+此前版本的 FastMap 计算精度与优化预算、显存分块、失败任务目录复用、求解阶段进度、投影校验和项目缓存等功能继续保留。
 
-| 项目 | 要求 |
-| --- | --- |
-| 系统 | Windows 10 / 11 x64 |
-| 显卡 | NVIDIA GPU 10系以上 |
-| Blender | 导出工程需要另行安装 Blender 4.0 或更新版本；已实测 4.2 与 5.2 |
-| 依赖 | 便携版附带 Python、Qt、PyTorch CUDA、FFmpeg 与求解器，无需另装 CUDA Toolkit |
+## 启动
 
-便携版解压后约 **5.21 GiB**，项目结果还需要额外空间。显存占用随帧数、图像尺寸和场景复杂度变化；FastMap 使用分块策略，仍可能遇到显存不足。
+普通用户请从 [GitHub Releases](https://github.com/DingBuDoa/Seedom/releases) 下载 Windows 便携发行版。**Code → Download ZIP** 只包含源码，不包含 Python、Qt、CUDA、FFmpeg、COLMAP 或 GLOMap 运行文件。
 
-GLOMap 的 CPU 回退只涉及相应求解阶段，特征提取与匹配仍使用 GPU。软件会保留提示与完整日志；真实求解错误仍会报告失败。
+准备好完整运行环境后，源码目录也可以通过 **Start.bat** 启动。开发环境准备和验证方式见[开发说明](docs/DEVELOPMENT.md)。
 
-## 开始使用
+## 常用流程
 
-普通用户请下载 **v1.0.1 Windows x64 便携发行包**。GitHub 的 **Code → Download ZIP** 是源码，未附带 Python、CUDA 与求解器运行文件。
+1. 添加一个或多个视频任务，选择 FastMap 或 GLOMap。
+2. 需要自动生成 Blender 工程时，勾选任务底部的 Blender 选项，选择检测到的 Blender 版本，并设置所需的导出参数。
+3. 点击“开始队列”。任务按列表顺序执行；用上下箭头调整尚未开始任务的顺序。
+4. 求解完成后也可选中已有点云，手动生成 Blender 工程，无需重新解算。
 
-分卷发行包需要同时下载 `.zip.001`、`.zip.002`、`Merge-PointStudio.bat` 和 `SHA256SUMS.txt` 到同一个文件夹。双击 **Merge-PointStudio.bat**，或在终端运行：
+起始帧偏移只移动 Blender 时间轴中的相机轨迹和背景合成，不会减少源视频解算、点云、相机位姿或导出序列帧的数量。自动导出与手动导出使用相同的 Blender 场景参数。
 
-```powershell
-.\Merge-PointStudio.bat
-```
-
-脚本先检查分卷 SHA-256，再合并为完整 ZIP。解压合并后的 ZIP，将整个目录放到可写位置，双击 **Start.bat**。
-
-1. 添加视频，选择求解方案和处理参数。
-2. 按需勾选序列帧与自动生成 Blender 文件。
-3. 用上下箭头安排顺序，点击“开始队列”。
-4. 完成后打开结果，或选择点云结果生成 Blender 工程。
+Blender 版本在软件启动时自动检测。可在“设置 → Blender 与日志”查看已缓存版本或重新扫描；需要使用不在扫描结果中的版本时，可在任务的 Blender 区域点击“添加版本…”。版本缓存写入个人设置，不会修改 Blender 本身的用户设置。
 
 ## 输出结构
 
 ```text
 output/
   项目名称/
-    point could/           点云与完整 COLMAP 模型
-    log/                   当前任务全部日志
-    video/                 可选 JPG 序列帧
-    项目名称_4.2.blend      文件名包含所选 Blender 版本
-    _cache/                数据库、处理帧与必要中间文件
+    point could/        点云及完整 COLMAP 模型
+    log/                当前任务日志
+    video/              勾选导出时生成的 JPG 序列帧
+    项目名称_4.2.blend   生成时包含所选 Blender 版本
+    _cache/             数据库、处理帧及必要中间数据
 ```
 
-相机背景使用 `_cache/images`，请保留缓存。重名项目自动增加序号，已有工程不会覆盖。移入项目回收目录会移动项目及缓存，原视频保留。
+相机背景引用 `_cache/images`，请保留缓存。同名项目自动加序号，已有 Blender 文件不会覆盖。
 
-## 源码与验证
+## 求解与资源
 
-仓库包含界面、任务调度、导出逻辑、本地适配 FastMap 与摄影测量导入插件源码；运行依赖通过便携发行包提供。[开发说明](docs/DEVELOPMENT.md)介绍目录、环境准备和验证方法。
+FastMap 使用 GPU 进行特征和匹配计算，可选择计算精度档位；其优化器有迭代、时间和改善幅度保护。保护停止时软件保留本步最佳有效参数并继续后续处理，同时提醒检查相机轨迹。GLOMap 使用自身停止条件；检测到 GPU 回退到 CPU 时会提醒并继续求解。
 
-1.0.1 已通过真实短片求解与 Blender 4.2 导出验证。Blender 5.2 的点云与背景另有专项验证；未测试所有 Blender 版本、显卡和驱动组合。
+FastMap 的长轨迹数据采用分块处理，以降低临时显存峰值。显存需求仍受视频帧数、特征数量与匹配规模影响；尚未在物理 8GB 显卡上验证，不保证所有超大场景都能完成。Blender 需要单独安装 4.0 或更新版本。
 
-## 项目来源
+## 设置与项目
 
-| 项目 | 集成版本 | 用途 |
-| --- | --- | --- |
-| [FastMap](https://github.com/pals-ttic/fastmap) | 0.1，本地适配 | 相机求解与稀疏重建 |
-| [GLOMAP](https://github.com/colmap/glomap) | 本地 CUDA / cuDSS 构建 | 全局运动恢复 |
-| [COLMAP](https://github.com/colmap/colmap) | 3.12.3 · 74b2be9 | 特征与匹配 |
-| [FFmpeg](https://github.com/FFmpeg/FFmpeg) | 7.1.1 | 解码、缩放与抽帧 |
-| [Photogrammetry Importer](https://github.com/SBCV/Blender-Addon-Photogrammetry-Importer) | 3.2.1，本地适配 | Blender 摄影测量数据导入 |
+设置可管理新任务的求解默认值、输出路径、Python 环境、Blender FPS、默认导出起始帧偏移及日志保留策略。失败任务目录复用默认关闭；开启后仅复用同素材的未完成项目，已完成项目不会覆盖。
 
-各第三方组件遵循其原有许可；版权与许可声明保留在对应源码和运行包中，详情见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。PointStudio 自有代码的统一许可证尚未指定。
+关于页面展示本软件版本、构建日期、项目主页和第三方开源项目链接。各依赖许可随组件保留。

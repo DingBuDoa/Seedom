@@ -16,10 +16,10 @@ tools/verify_release.py     检查便携版独立性与文件校验
 
 ## 准备环境
 
-当前验证过的方式是复用同版本便携包的运行文件：
+仓库只包含源码和依赖版本索引，不包含 Python、Qt、CUDA DLL、FFmpeg、COLMAP 或 GLOMap 二进制。可复用同版本 Windows 便携发行包中的运行文件：
 
 1. 克隆或解压源码。
-2. 将 v1.0.1 便携包中的 `runtime/python`、`runtime/cuda`、`runtime/colmap`、`runtime/glomap-gpu`、`runtime/ffmpeg` 复制到源码的 `runtime` 下。保留仓库自己的 `runtime/fastmap`。
+2. 将 v1.1.0 便携包中的 `runtime/python`、`runtime/cuda`、`runtime/colmap`、`runtime/glomap-gpu`、`runtime/ffmpeg` 复制到源码的 `runtime` 下。保留仓库自己的 `runtime/fastmap`。
 3. 双击 `Start.bat`，首次启动会建立默认配置。
 
 嵌入式 Python 的搜索路径已相对于 `runtime/python` 配置，软件路径均以源码根目录为基准。运行依赖版本见 `config/runtime-manifest.json` 与 `config/runtime-requirements.txt`。仅执行 pip 安装不能替代原生求解器与 DLL。
@@ -45,6 +45,6 @@ GPU GLOMap 使用本地 CUDA / cuDSS 构建；本仓库目前没有完整原生�
 & .\runtime\python\python.exe tools/verify_release.py
 ```
 
-构建脚本创建 `PointStudio-1.0.1/`，复制独立运行文件、生成干净配置与 SHA-256 清单；目标非空时拒绝覆盖。验证脚本在受限 PATH 下检查 Qt、CUDA、FFmpeg、COLMAP、GLOMap、启动入口与清单，报告写在 `tests/artifacts`。
+构建脚本根据 `app/app_info.py` 中的名称与版本创建便携目录，复制独立运行文件、生成干净配置与 SHA-256 清单；目标非空时拒绝覆盖。验证脚本在受限 PATH 下检查 Qt、CUDA、FFmpeg、COLMAP、GLOMap、启动入口与清单，报告写在 `tests/artifacts`。
 
-发布时将源码提交到 Git，便携压缩包放在 GitHub Release 附件。超过单附件 2 GiB 时使用分卷，并同时发布合并脚本和 SHA-256 清单。发布说明模板见 [RELEASE_v1.0.1.md](RELEASE_v1.0.1.md)。
+发布时将源码提交到 Git，便携压缩包放在 GitHub Release 附件。源码仓库不提交便携运行库或本地任务数据。1.1.0 修改说明见 [RELEASE_v1.1.0.md](RELEASE_v1.1.0.md)；旧版说明保留作发行归档。

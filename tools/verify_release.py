@@ -8,7 +8,10 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-RELEASE = ROOT / 'PointStudio-1.0.1'
+sys.path.insert(0, str(ROOT / 'app'))
+from app_info import APP_NAME, APP_VERSION
+
+RELEASE = ROOT / f'{APP_NAME}-{APP_VERSION}'
 REPORTS = ROOT / 'tests/artifacts/release-verification'
 
 

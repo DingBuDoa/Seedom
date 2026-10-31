@@ -19,6 +19,8 @@ from workload import source_signature, video_scene, describe_workload
 from native_paths import NativePaths
 from project_layout import create_project, cache_directory, result_report, safe_name
 from json_store import atomic_write_json
+from task_progress import TaskProgress
+from solver_quality import SOLVER_PROFILES, OPTIMIZATION_REVISION
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.avi', '.m4v', '.webm', '.mts', '.m2ts', '.wmv', '.mpg', '.mpeg'}
 HIDE_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
@@ -43,6 +45,7 @@ class Options:
     image_scale: float = 1.0
     export_sequence: bool = False
     sequence_original: bool = False
+    solver_quality: str = 'balanced'
 
     def validate(self):
         for key in ('fps', 'image_scale'):
@@ -60,6 +63,8 @@ class Options:
                 raise ValueError(f'{key} 路径不能为空')
         if self.backend not in ('fastmap', 'glomap') or self.camera_mode not in ('radial', 'pinhole', 'calibrated'):
             raise ValueError('未知求解器或相机模式')
+        if not isinstance(self.solver_quality, str) or self.solver_quality not in SOLVER_PROFILES:
+            raise ValueError('未知计算精度')
         if not 0 <= self.fps <= 240 or not 256 <= self.max_size <= 16384 or not 1 <= self.overlap <= 200:
             raise ValueError('抽帧率、图像尺寸或匹配范围超出允许范围')
         if not 2 <= self.gpu_min_images <= 1000000:
@@ -98,13 +103,17 @@ class Pipeline:
         self.log_dir = None
         self.project_name = None
         self.project_dir = None
+        self.reuse_failed_projects = False
         self._pending_logs = []
         self.warnings = []
+        self.workload = None
+        self.progress = TaskProgress(options, self.emit)
 
     def warn_solver(self, code, text):
         if any(item['code'] == code for item in self.warnings):
             return
-        warning = dict(code=code, text=text, log_path=str(self.log_dir / '04-glomap.log'))
+        filename = '04-fastmap.log' if self.options.backend == 'fastmap' else '04-glomap.log'
+        warning = dict(code=code, text=text, log_path=str(self.log_dir / filename))
         self.warnings.append(warning)
         self.emit('log', text=f"[求解提醒] {text} 日志：{warning['log_path']}\n")
         self.emit('solver_warning', **warning)
@@ -112,6 +121,21 @@ class Pipeline:
     def observe_glomap_output(self, line):
         if self.options.backend == 'glomap' and self.options.glomap_gpu and 'falling back' in line.casefold():
             self.warn_solver('cpu_fallback', 'GLOMap 已回退到 CPU，任务将继续求解和导出，处理速度可能降低。')
+
+    def observe_fastmap_output(self, line):
+        if not line.startswith('[POINTSTUDIO_OPTIMIZATION] '):
+            return
+        try:
+            event = json.loads(line.split(' ', 1)[1])
+            stage, reason = event['stage'], event['reason']
+            stages = {'rotation': '旋转对齐', 'translation': '位置对齐', 'distortion': '畸变优化', 'epipolar': '极线优化'}
+            reasons = {'iteration_limit': '迭代上限', 'time_limit': '单步时间预算',
+                       'stage_time_limit': '阶段总时间预算', 'nonfinite_loss': '数值异常保护'}
+            if stage in stages and reason in reasons:
+                self.warn_solver('optimization_limit_' + stage,
+                    f'FastMap {stages[stage]}触及{reasons[reason]}，已保留本步最佳有效参数，继续后续处理；请检查生成轨迹质量。')
+        except (ValueError, TypeError, KeyError):
+            return
 
     def verify_glomap_gpu(self):
         mapping_log = (self.log_dir / '04-glomap.log').read_text(encoding='utf-8')
@@ -126,6 +150,11 @@ class Pipeline:
         return active
 
     def emit(self, kind, **data):
+        if kind == 'stage':
+            # Emit the legacy event first so the richer progress event wins in UI.
+            self.callback({'type': kind, **data})
+            self.progress.coarse(data['index'], data['text'])
+            return
         if kind == 'log':
             self._pending_logs.append(data['text'])
         if self.log_dir and self._pending_logs:
@@ -136,7 +165,7 @@ class Pipeline:
         self.callback({'type': kind, **data})
 
     def new_project(self, source, signature=None):
-        """Resume only this job's own compatible cache, never another project's."""
+        """Resume this job, or an unfinished matching project when enabled."""
         project = Path(self.project_dir) if self.project_dir else None
         manifest = project / '_cache/source.json' if project else None
         reusable = False
@@ -148,13 +177,58 @@ class Pipeline:
                 reusable = json.loads(manifest.read_text(encoding='utf-8')) == signature
             except (OSError, ValueError):
                 pass
+        if not reusable and self.reuse_failed_projects and signature is not None:
+            root = Path(self.options.output_root).resolve()
+            candidates = []
+            if same_destination:
+                candidates.append(project)
+            if root.is_dir():
+                candidates.extend(sorted((p for p in root.iterdir()
+                    if re.fullmatch(re.escape(requested_name) + r'(?: \(\d+\))?', p.name)),
+                    key=lambda p: p.stat().st_mtime_ns, reverse=True))
+            for candidate in dict.fromkeys(candidates):
+                cache = candidate / '_cache'
+                # Successful deliverables and linked directories never qualify.
+                if (not candidate.is_dir() or candidate.is_symlink() or cache.is_symlink()
+                        or (cache / 'result.json').exists() or (candidate / 'point could').exists()
+                        or any(candidate.glob('*.blend'))):
+                    continue
+                try:
+                    previous = json.loads((cache / 'source.json').read_text(encoding='utf-8'))
+                    same_source = (Path(previous['source']).resolve() == Path(signature['source']).resolve()
+                                   and all(previous.get(key) == signature.get(key) for key in ('size', 'mtime_ns')))
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
+                if not same_source:
+                    continue
+                if previous != signature:
+                    self.preserve_retry_cache(candidate)
+                project, reusable = candidate, True
+                self.emit('log', text=f'[重试] 复用未完成项目目录：{project}\n')
+                break
         if not reusable:
             project = create_project(self.options.output_root, self.project_name or Path(source).stem)
         self.project_dir = project
+        self.project_reused = reusable
         self.log_dir = project / 'log'
         self.log_dir.mkdir(exist_ok=True)
         self.emit('scene', path=str(project))
         return project
+
+    def preserve_retry_cache(self, project):
+        """Retain incompatible generated data inside the project's private cache."""
+        cache = project / '_cache'
+        destination = cache / 'retry_history' / (datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6])
+        destination.mkdir(parents=True)
+        for name in ('source.json', 'images', 'database.db', 'database.db-wal', 'database.db-shm',
+                     '.frames-complete', '.features-complete', '.matching-complete'):
+            path = cache / name
+            if path.exists() or path.is_symlink():
+                path.rename(destination / name)
+        # A partial sequence from the previous attempt must not leave extra frames.
+        if (project / 'video').exists():
+            (project / 'video').rename(destination / 'video')
+        self.emit('log', text='[重试] 处理参数已变化，旧缓存已保存在 _cache/retry_history；本次重新抽帧与匹配。\n')
 
     def check_cancel(self):
         if self.cancelled.is_set():
@@ -214,6 +288,7 @@ class Pipeline:
 
     def _command(self, args, label, cwd=None, env=None):
         self.check_cancel()
+        self.progress.command(label)
         args = [str(a) for a in args]
         log_path = self.log_dir / f'{label}.log'
         if log_path.exists():
@@ -241,8 +316,11 @@ class Pipeline:
                     line = re.sub(r'\x1b\[[0-?]*[ -/]*[@-~]', '', line)
                     log.write(line)
                     self.emit('log', text=line)
+                    self.progress.observe(label, line)
                     if label == '04-glomap':
                         self.observe_glomap_output(line)
+                    elif label == '04-fastmap':
+                        self.observe_fastmap_output(line)
                 exit_code = child.wait()
             finally:
                 try:
@@ -287,6 +365,11 @@ class Pipeline:
             raise ValueError(f'不支持的视频：{video}')
         signature = source_signature(video, o)
         scene = self.new_project(video, signature)
+        if self.project_reused and self.workload is not None:
+            try:
+                self.workload = describe_workload(video, o, False, scene)
+            except Exception:
+                pass
         cache = cache_directory(scene)
         manifest = cache / 'source.json'
         if manifest.exists() and json.loads(manifest.read_text(encoding='utf-8')) != signature:
@@ -333,6 +416,14 @@ class Pipeline:
             workload = describe_workload(source, o, existing_scene, self.project_dir)
         except Exception:
             workload = None
+        if workload:
+            self.workload = workload
+            self.progress.frames = round(workload['frames'])
+            try:
+                from estimate import prediction_range
+                self.progress.estimate = prediction_range(workload, o, hardware)
+            except Exception:
+                pass
         if existing_scene:
             scene = Path(source).resolve()
             cache = cache_directory(scene)
@@ -345,6 +436,13 @@ class Pipeline:
             if o.camera_mode == 'calibrated':
                 raise ValueError('已标定模式需要先准备含准确内参的场景数据库')
             scene = self.prepare_video(source)
+            workload = self.workload or workload
+            if workload:
+                try:
+                    from estimate import prediction_range
+                    self.progress.estimate = prediction_range(workload, o, hardware)
+                except Exception:
+                    pass
             cache = cache_directory(scene)
             images = cache / 'images'
         database = cache / 'database.db'
@@ -375,7 +473,8 @@ class Pipeline:
         gpu_solver_active = o.backend == 'fastmap'
         if o.backend == 'fastmap':
             args = [o.python, '-u', APP / 'fastmap_worker.py', '--device', 'cuda:0',
-                    '--headless', '--database', database, '--output_dir', result]
+                    '--headless', '--database', database, '--output_dir', result,
+                    '--solver-quality', o.solver_quality]
             if o.color:
                 args += ['--image_dir', images]
             if o.camera_mode in ('pinhole', 'calibrated'):
@@ -449,6 +548,7 @@ class Pipeline:
             self.command(args + ['-qscale:v', '2', sequence / 'frame_%06d.jpg'], '06-video-sequence')
             self.check_cancel()
         # Publish a shallow, complete model only after all required exports succeed.
+        self.progress.begin('publish')
         delivered_model = self.project_dir / 'point could'
         shutil.move(str(model), str(delivered_model))
         model = delivered_model
@@ -460,7 +560,11 @@ class Pipeline:
                    'mapping_wall_seconds': elapsed, 'database': counts, 'metrics': metrics,
                    'gpu_solver_active': gpu_solver_active, 'solver_warnings': list(self.warnings), 'status': 'complete',
                    'hardware': hardware, 'estimate_settings': settings_signature(o), 'workload': workload,
+                   'phase_seconds': self.progress.timings(),
                    'completed_at': datetime.now().isoformat(timespec='seconds')}
+        if o.backend == 'fastmap':
+            summary['optimization_policy'] = dict(SOLVER_PROFILES[o.solver_quality],
+                                                  profile=o.solver_quality, revision=OPTIMIZATION_REVISION)
         if sequence is not None:
             summary['sequence'] = str(sequence)
         if o.image_scale != 1:

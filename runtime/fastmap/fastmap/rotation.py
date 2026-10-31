@@ -422,12 +422,13 @@ def loop(
 
         # convergence manager
         convergence_manager = ConvergenceManager(
-            warmup_steps=5, decay=0.95, convergence_window=10
+            warmup_steps=5, decay=0.95, convergence_window=10,
+            parameters=[params], stage='rotation',
         )
         convergence_manager.start()
 
         # loop for optimization
-        for iter_idx in range(1000000):
+        for iter_idx in range(convergence_manager.max_steps):
             # forward
             R_w2c1 = rotation_6d_to_matrix(
                 torch.index_select(input=params, dim=0, index=image_idx1)
@@ -442,6 +443,10 @@ def loop(
                 R_w2c2=R_w2c2,
                 R_rel=rotation,
             )
+            moving_loss, finished = convergence_manager.step(iter_idx, loss)
+            if finished:
+                logger.info(f"Rotation stopped: {convergence_manager.reason}; best loss {convergence_manager.best_loss:.8g}")
+                break
 
             # backward to parameters
             optimizer.zero_grad()
@@ -453,22 +458,13 @@ def loop(
             # gradient step
             optimizer.step()
 
-            # check convergence
-            moving_loss, if_converged = convergence_manager.step(
-                step=iter_idx, loss=loss
-            )
-            if if_converged:
-                logger.info(
-                    f"Loop finished at iter {iter_idx} with moving loss {moving_loss:.6f}"
-                )
-                break
-
             if iter_idx % log_interval == 0:
                 logger.info(
                     f"[Iter {iter_idx}] loss={loss.item():.6f}, moving_loss={moving_loss:.6f}"
                 )
 
     # convert back to rotation matrix
+    convergence_manager.restore_best()
     R_w2c = rotation_6d_to_matrix(params.data)  # (num_images, 3, 3)
 
     ##### return the rotation matrix #####

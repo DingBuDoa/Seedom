@@ -31,6 +31,8 @@ def settings_signature(options):
         values['sequence_original'] = options.sequence_original
     if options.backend == 'fastmap':
         values['color'] = options.color
+        from solver_quality import OPTIMIZATION_REVISION
+        values.update(solver_quality=options.solver_quality, optimization_revision=OPTIMIZATION_REVISION)
     elif options.glomap_gpu:
         values['gpu_min_images'] = options.gpu_min_images
     return values

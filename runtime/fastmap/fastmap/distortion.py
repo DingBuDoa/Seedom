@@ -78,30 +78,25 @@ def alpha_to_k1(
 
     # build convergence manager
     convergence_manager = ConvergenceManager(
-        warmup_steps=10, decay=0.9, convergence_window=100
+        warmup_steps=10, decay=0.9, convergence_window=100,
+        parameters=[k1], stage='distortion', max_steps=max_iters,
     )
     convergence_manager.start()
 
     # loop
     with torch.enable_grad():
-        for iter_idx in range(max_iters):
+        for iter_idx in range(convergence_manager.max_steps):
             xy_pred = distort_brown_conrady(
                 _xy=xy_undistorted, _k1=k1[:, None].expand(xy_undistorted.shape[:2])
             )  # (num_cameras, num_samples, 2)
             loss = F.l1_loss(xy_pred, xy_target)  # ()
+            moving_loss, finished = convergence_manager.step(iter_idx, loss)
+            if finished:
+                logger.info(f"Distortion stopped: {convergence_manager.reason}; best loss {convergence_manager.best_loss:.8g}")
+                break
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-
-            # check convergence
-            moving_loss, if_converged = convergence_manager.step(
-                step=iter_idx, loss=loss
-            )  # float, bool
-            if if_converged:
-                logger.info(
-                    f"Converged at iteration {iter_idx+1} with loss {moving_loss} and mean k1 {k1.mean().item()}"
-                )
-                break
 
             if iter_idx % log_interval == 0:
                 logger.info(
@@ -109,6 +104,7 @@ def alpha_to_k1(
                 )
 
     # rescale k1 with T and focal
+    convergence_manager.restore_best()
     k1 = k1.data  # (num_cameras,)
     assert torch.allclose(T[:, 0, 0], T[:, 1, 1])  # make sure it is isotropic
     k1 *= (T[:, 0, 0] * cameras.focal) ** 2.0  # (num_cameras,)

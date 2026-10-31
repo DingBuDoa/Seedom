@@ -1,10 +1,12 @@
 import os
+import time
 from loguru import logger
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from fastmap.timer import timer
+from fastmap.point_pair import image_pair_index
 from fastmap.container import PointPairs, Cameras, Images
 from fastmap.utils import (
     to_homogeneous,
@@ -14,6 +16,7 @@ from fastmap.utils import (
     vector_to_skew_symmetric_matrix,
 )
 from fastmap.utils import ConvergenceManager
+from fastmap.optimization import policy, report_stop
 
 
 class EpipolarAdjustmentParameters(nn.Module):
@@ -103,7 +106,7 @@ def quadratic_form(
         num_valid_point_pairs_in_batch = batch_point_pair_mask.long().sum().item()
         batch_image_pair_idx = image_pair_idx[
             batch_data.point_pair_idx[batch_point_pair_mask]
-        ]  # (num_valid_point_pairs_in_batch,)
+        ].long()  # (num_valid_point_pairs_in_batch,)
         batch_fundamental = prev_fundamental[
             batch_image_pair_idx
         ]  # (num_valid_point_pairs_in_batch, 3, 3)
@@ -155,7 +158,7 @@ def quadratic_form(
         )  # (num_image_pairs, 9, 9)
 
     # scale by the number of point pairs
-    W /= point_pair_mask.to(W).sum()  # (num_image_pairs, 9, 9)
+    W /= point_pair_mask.sum().to(W)  # (num_image_pairs, 9, 9)
 
     # convert to the desired precision
     W = W.to(precision)  # (num_image_pairs, 9, 9)
@@ -548,6 +551,8 @@ def _all_error(
     focal_scale: torch.Tensor,
     camera_idx: torch.Tensor,
     image_mask: torch.Tensor,
+    threshold=None,
+    original_mask=None,
 ):
     """Compute the epipolar error for all point pairs.
     Args:
@@ -565,8 +570,8 @@ def _all_error(
     num_point_pairs = point_pairs.num_point_pairs
 
     # initialize error
-    error = torch.nan + torch.zeros(
-        num_point_pairs, device=device, dtype=dtype
+    error = torch.empty(
+        num_point_pairs, device=device, dtype=(dtype if threshold is None else torch.bool)
     )  # (num_point_pairs,)
 
     # loop over batches
@@ -591,14 +596,14 @@ def _all_error(
         batch_error = torch.einsum(
             "bi,bij,bj->b", batch_xy_homo2, batch_fundamental, batch_xy_homo1
         ).abs()  # (B,)
-        error[batch_data.point_pair_idx] = batch_error
-
-    # set errors involving invalid images to inf
-    error[~image_mask[point_pairs.image_idx[point_pairs.point_idx1]]] = torch.inf
-    error[~image_mask[point_pairs.image_idx[point_pairs.point_idx2]]] = torch.inf
-
-    # make sure there is no nan
-    assert not torch.any(torch.isnan(error))
+        valid = image_mask[batch_data.image_idx1] & image_mask[batch_data.image_idx2]
+        batch_error[~valid] = torch.inf
+        assert not torch.any(torch.isnan(batch_error))
+        if threshold is None:
+            error[batch_data.point_pair_idx] = batch_error
+        else:
+            error[batch_data.point_pair_idx] = (
+                original_mask[batch_data.point_pair_idx] & (batch_error < threshold))
 
     # return
     return error
@@ -619,6 +624,7 @@ def loop(
     lr: float = 0.0001,
     precision: torch.dtype = torch.float32,
     log_interval: int = 500,
+    deadline: float | None = None,
 ):
     """Global epipolar adjustment loop.
 
@@ -696,7 +702,8 @@ def loop(
     convergence_manager = ConvergenceManager(
         warmup_steps=10,
         decay=0.0,
-        convergence_window=100,
+        convergence_window=policy()['patience'],
+        parameters=params.parameters(), stage='epipolar', deadline=deadline,
     )
     convergence_manager.start()
 
@@ -706,7 +713,7 @@ def loop(
     ##### Optimization loop #####
 
     with torch.enable_grad():
-        for iter_idx in range(1000000000):
+        for iter_idx in range(convergence_manager.max_steps):
             (
                 R_w2c,
                 t_w2c,
@@ -728,6 +735,13 @@ def loop(
             if isinstance(loss, torch.Tensor):
                 loss = loss.item()  # convert to scalar
 
+            # Evaluate/checkpoint the exact parameters that produced this loss.
+            moving_loss, finished = convergence_manager.step(iter_idx, loss)
+            if finished:
+                logger.info(f"Optimization stopped at iteration {iter_idx+1}: {convergence_manager.reason}; "
+                            f"best loss {convergence_manager.best_loss:.8g}")
+                break
+
             # backprop
             optimizer.zero_grad()
 
@@ -740,16 +754,6 @@ def loop(
             # step
             optimizer.step()
 
-            # check convergence
-            moving_loss, if_converged = convergence_manager.step(
-                step=iter_idx, loss=loss
-            )
-            if if_converged:
-                logger.info(
-                    f"Converged at iteration {iter_idx+1} with moving loss {moving_loss:.8f}"
-                )
-                break
-
             # log
             if iter_idx % log_interval == 0:
                 logger.info(
@@ -757,6 +761,7 @@ def loop(
                 )
 
     ##### Get the results and convert to the original dtype #####
+    convergence_manager.restore_best()
     (
         R_w2c,
         t_w2c,
@@ -821,38 +826,11 @@ def epipolar_adjustment(
     device = R_w2c.device
     assert num_prune_steps >= 0
 
-    ##### Make sure the point pair mask only involves valid images #####
-    assert torch.all(
-        images.mask[point_pairs.image_idx[point_pairs.point_idx1][point_pair_mask]]
-    )
-    assert torch.all(
-        images.mask[point_pairs.image_idx[point_pairs.point_idx2][point_pair_mask]]
-    )
-
-    ##### Preserve the original point pair mask #####
-    original_point_pair_mask = point_pair_mask.clone()  # (num_point_pairs,)
-
-    ##### Find all image pairs with a non-empty set of inliers #####
-    # get point pair idx
-    unique_image_idx, _inverse_idx = torch.unique(
-        torch.stack(
-            [
-                point_pairs.image_idx[point_pairs.point_idx1][point_pair_mask],
-                point_pairs.image_idx[point_pairs.point_idx2][point_pair_mask],
-            ],
-            dim=-1,
-        ),
-        dim=0,
-        return_inverse=True,
-    )  # (num_image_pairs, 2), (num_valid_point_pairs,)
-    image_idx1, image_idx2 = unique_image_idx.unbind(
-        -1
-    )  # (num_image_pairs,), (num_image_pairs,)
-    image_pair_idx = 209347298473 + torch.zeros(
-        point_pairs.num_point_pairs, device=point_pairs.device, dtype=torch.long
-    )  # (num_point_pairs,) use a large number to indicate invalid
-    image_pair_idx[point_pair_mask] = _inverse_idx  # (num_point_pairs,)
-    del unique_image_idx, _inverse_idx
+    for batch in point_pairs.query(point_pair_mask):
+        assert torch.all(images.mask[batch.image_idx1] & images.mask[batch.image_idx2])
+    original_point_pair_mask = point_pair_mask.clone()
+    image_idx1, image_idx2, image_pair_idx = image_pair_index(
+        point_pairs, images.num_images, point_pair_mask)
 
     # get number of image pairs
     num_image_pairs = image_idx1.shape[0]
@@ -875,10 +853,14 @@ def epipolar_adjustment(
     )  # (num_cameras,)
 
     ##### Optimize #####
+    deadline = time.monotonic() + policy()['epipolar_seconds']
     for i in range(num_prune_steps + 1):
         with timer(f"Round {i}"):
             # optimization loops
             for j in range(num_irls_steps):
+                if time.monotonic() >= deadline:
+                    report_stop('epipolar', 'stage_time_limit', round=i+1, irls_step=j+1)
+                    return R_w2c, t_w2c, focal_scale, point_pair_mask
 
                 # IRLS steps
                 with timer(f"IRLS Iter {j}"):
@@ -899,49 +881,32 @@ def epipolar_adjustment(
                         lr=lr,
                         precision=torch.float32,
                         log_interval=log_interval,
+                        deadline=deadline,
                     )
 
             # prune point pairs
             if i < num_prune_steps:
                 thr = thr_list[i]
-                error = _all_error(
+                point_pair_mask = _all_error(
                     point_pairs=point_pairs,
                     R_w2c=R_w2c,
                     t_w2c=t_w2c,
                     focal_scale=focal_scale,
                     camera_idx=cameras.camera_idx,
                     image_mask=images.mask,
-                )  # (num_point_pairs,)
-                point_pair_mask = original_point_pair_mask & (
-                    error < thr
-                )  # (num_point_pairs,)
-                del error
-
-                # make sure only valid images are used
-                point_pair_mask &= images.mask[
-                    point_pairs.image_idx[point_pairs.point_idx1]
-                ]
-                point_pair_mask &= images.mask[
-                    point_pairs.image_idx[point_pairs.point_idx2]
-                ]
-
-                # update image pair mask
-                point_pair_count = torch.zeros(
-                    num_image_pairs, device=device, dtype=torch.long
-                )  # (num_image_pairs,)
-                point_pair_count.scatter_add_(
-                    dim=0,
-                    index=image_pair_idx[point_pair_mask],
-                    src=torch.ones_like(
-                        image_pair_idx[point_pair_mask], device=device, dtype=torch.long
-                    ),
+                    threshold=thr,
+                    original_mask=original_point_pair_mask,
                 )
+                point_pair_count = torch.zeros(num_image_pairs, device=device, dtype=torch.long)
+                for indices in point_pairs.index_batches(point_pair_mask):
+                    idx = image_pair_idx[indices].long()
+                    point_pair_count.scatter_add_(0, idx, torch.ones_like(idx))
                 image_pair_mask = point_pair_count > 0
                 del point_pair_count
 
                 # log
                 logger.info(
-                    f"Pruned {(~point_pair_mask).long().sum().item()} / {point_pair_mask.shape[0]} point pairs with threshold {thr}"
+                    f"Pruned {point_pair_mask.numel() - point_pair_mask.sum().item()} / {point_pair_mask.shape[0]} point pairs with threshold {thr}"
                 )
 
                 # decay learning rate

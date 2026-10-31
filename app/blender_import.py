@@ -11,6 +11,8 @@ from mathutils import Matrix, Quaternion, Vector
 from blender_plugin import enable_bundled_plugin
 from blender_scene_display import configure_point_cloud, configure_lighting, scene_name, add_point_handle
 from blender_background import configure_background, sequence_offset
+from blender_projection import camera_projection_error
+from frame_spacing import export_frame_numbers
 
 
 def progress(percent, text):
@@ -52,7 +54,9 @@ def intrinsics(camera):
 
 def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
                  background_images=True, point_radius=0.005, draw_points=True,
-                 images_directory=None, report_path=None):
+                 images_directory=None, report_path=None, frame_start_offset=0):
+    if type(frame_start_offset) is not int or not 0 <= frame_start_offset <= 10000:
+        raise ValueError('导出起始帧偏移需要是 0 到 10000 之间的整数')
     if not as_mesh and not draw_points:
         raise ValueError('Enable colored point display or mesh export')
     progress(2, '正在加载摄影测量导入组件…')
@@ -94,7 +98,6 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     collection.name = scene_name('AutoTracker Reconstruction', '相机与点云重建')
     cloud = next(obj for obj in collection.all_objects if obj.type == 'MESH')
     count = len(cloud.data.vertices)
-    points = [tuple(cloud.data.vertices[i].co) for i in range(0, count, max(1, count // 25))]
     if not count:
         raise ValueError('Model has no points')
     cloud['point_count'] = count
@@ -116,15 +119,17 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     previous = None
     frames = []
     projection_errors = []
-    ordered_images = sorted(images, key=lambda item: item['name'])
-    frame_numbers = []
-    for sequence, image in enumerate(ordered_images, 1):
+    all_ordered_images = sorted(images, key=lambda item: item['name'])
+    source_frame_numbers = []
+    for sequence, image in enumerate(all_ordered_images, 1):
         match = re.search(r'(\d+)$', Path(image['name']).stem)
-        frame_numbers.append(int(match.group(1)) if match else sequence)
-    if len(set(frame_numbers)) != len(frame_numbers):
+        source_frame_numbers.append(int(match.group(1)) if match else sequence)
+    if len(set(source_frame_numbers)) != len(source_frame_numbers):
         raise ValueError('Image names produce duplicate animation frame numbers')
+    frame_numbers = export_frame_numbers(len(all_ordered_images), frame_start_offset)
+    source_frame_duration = max(source_frame_numbers) - min(source_frame_numbers) + 1
     if background_images:
-        first = ordered_images[0]
+        first = all_ordered_images[0]
         image_path = images_directory / first['name']
         if not image_path.is_file():
             raise FileNotFoundError(f'Missing camera background: {image_path}')
@@ -133,13 +138,12 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
         background.image.source = 'SEQUENCE'
         background.image_user.frame_start = frame_numbers[0]
         background.image_user.frame_offset = sequence_offset(background.image)
-        background.image_user.frame_duration = max(frame_numbers) - min(frame_numbers) + 1
+        background.image_user.frame_duration = source_frame_duration
         background.image_user.use_auto_refresh = True
         background.display_depth = 'BACK'
         background.alpha = 0.7
         camera_data.show_background_images = True
-    from bpy_extras.object_utils import world_to_camera_view
-    for sequence, image in enumerate(ordered_images, 1):
+    for sequence, image in enumerate(all_ordered_images, 1):
         frame = frame_numbers[sequence - 1]
         frames.append(frame)
         width, height, fx, fy, cx, cy = intrinsics(cameras[image['camera']])
@@ -162,19 +166,13 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
         camera.keyframe_insert(data_path='rotation_quaternion', frame=frame)
         for property_name in ('lens', 'shift_x', 'shift_y'):
             camera_data.keyframe_insert(data_path=property_name, frame=frame)
-        # Check axis conversion and intrinsics against the ideal COLMAP projection.
-        if sequence in (1, len(images) // 2, len(images)):
+        # Check a stable grid of in-frame rays instead of arbitrary cloud points.
+        if sequence in (1, len(all_ordered_images) // 2, len(all_ordered_images)):
             bpy.context.view_layer.update()
-            for point in points:
-                projected = pose @ Vector(point)
-                if projected.z <= 0:
-                    continue
-                uv = world_to_camera_view(scene, camera, Vector(point))
-                expected = (fx * projected.x / projected.z + cx, fy * projected.y / projected.z + cy)
-                error = max(abs(uv.x * width - expected[0]), abs((1 - uv.y) * height - expected[1]))
-                projection_errors.append(error)
-        if sequence == 1 or sequence % max(1, len(images) // 20) == 0 or sequence == len(images):
-            progress(25 + int(50 * sequence / len(images)), f'正在生成相机动画：{sequence}/{len(images)} 帧')
+            projection_errors.append(camera_projection_error(scene, camera, pose,
+                                     (width, height, fx, fy, cx, cy)))
+        if sequence == 1 or sequence % max(1, len(all_ordered_images) // 20) == 0 or sequence == len(all_ordered_images):
+            progress(25 + int(50 * sequence / len(all_ordered_images)), f'正在生成相机动画：{sequence}/{len(all_ordered_images)} 帧')
 
     # Blender 4.4+ uses layered actions; older versions expose legacy fcurves.
     for owner in (camera, camera_data):
@@ -193,13 +191,18 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     scene.frame_set(scene.frame_start)
     scene['source_model'] = str(model)
     scene['camera_parameters'] = json.dumps(cameras)
-    scene['registered_frames'] = len(images)
+    scene['registered_frames'] = len(all_ordered_images)
+    scene['source_registered_frames'] = len(images)
+    scene['frame_start_offset'] = frame_start_offset
     scene['photogrammetry_importer_version'] = str(plugin.bl_info['version'])
     scene['points_as_mesh'] = as_mesh
     scene['suppress_distortion_warnings'] = suppress_warnings
     scene['lens_distortion_note'] = 'Camera animation uses ideal pinhole projection; lens distortion is not applied. COLMAP parameters are stored on scene.'
     scene['scale_note'] = 'Monocular SfM has arbitrary global scale and orientation.'
     maximum_error = max(projection_errors, default=0)
+    print('[BLENDER_PROJECTION] ' + json.dumps(dict(
+        method='in-frame-reference-rays-v1', max_error_px=maximum_error,
+        tolerance_px=0.1, checked_frames=len(projection_errors))), flush=True)
     if maximum_error > 0.1:
         raise ValueError(f'Blender/COLMAP ideal projection mismatch: {maximum_error:.6f}px')
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -212,18 +215,20 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     configure_lighting(scene)
     if background_images:
         progress(87, '正在配置预览与渲染背景合成…')
-        configure_background(scene, background.image, frame_numbers[0], max(frame_numbers) - min(frame_numbers) + 1)
+        configure_background(scene, background.image, frame_numbers[0], source_frame_duration)
     scene['native_point_display'] = 1
     scene['export_language'] = bpy.context.preferences.view.language
     scene['draw_colored_points'] = draw_points
     progress(92, '正在写入 Blender 工程文件…')
     bpy.ops.wm.save_as_mainfile(filepath=str(output))
-    report = {'blend': str(output), 'registered_frames': len(images), 'points': count,
+    report = {'blend': str(output), 'registered_frames': len(all_ordered_images), 'points': count,
               'frame_start': scene.frame_start, 'frame_end': scene.frame_end, 'fps': fps,
               'max_ideal_projection_difference_px': maximum_error,
+              'ideal_projection_validation': 'in-frame-reference-rays-v1',
               'lens_distortion_applied': False, 'as_mesh': as_mesh,
               'suppress_distortion_warnings': suppress_warnings,
               'background_images': background_images, 'point_radius': point_radius,
+              'frame_start_offset': frame_start_offset, 'source_registered_frames': len(images),
               'render_background': background_images,
               'draw_points': draw_points,
               'native_point_display': True, 'viewport_shading': 'MATERIAL',
@@ -247,10 +252,11 @@ if __name__ == '__main__':
     parser.add_argument('--draw-points', type=int, choices=(0, 1), default=1)
     parser.add_argument('--images', type=Path)
     parser.add_argument('--report', type=Path)
+    parser.add_argument('--frame-start-offset', type=int, default=0)
     arguments = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
     if not 0 < arguments.fps <= 240 or not 0 < arguments.point_radius <= 100:
         raise ValueError('FPS or point radius is outside the allowed range')
     import_model(arguments.model.resolve(), arguments.output.resolve(), arguments.fps,
                  bool(arguments.as_mesh), bool(arguments.suppress_distortion_warnings),
                  bool(arguments.background_images), arguments.point_radius, bool(arguments.draw_points),
-                 arguments.images, arguments.report)
+                 arguments.images, arguments.report, arguments.frame_start_offset)
