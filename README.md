@@ -1,17 +1,17 @@
 <div align="center">
 
-# PointStudio
+# 拾点VFX（SeedomVFX）
 
 **从视频到相机轨迹、彩色点云与 Blender 工程**
 
 Windows 桌面工具 · PySide6 / Qt 6 · **v1.0.1** · 2026-10-24
 
-[下载 v1.0.1](https://github.com/DingBuDoa/PointStudio/releases/tag/v1.0.1) · [使用指南](#开始使用) · [源码开发](docs/DEVELOPMENT.md) · [更新记录](CHANGELOG.md) · [第三方项目](THIRD_PARTY_NOTICES.md)
+[下载 v1.0.1](https://github.com/DingBuDoa/Seedom/releases/tag/v1.0.1) · [使用指南](#开始使用) · [源码开发](docs/DEVELOPMENT.md) · [更新记录](CHANGELOG.md) · [第三方项目](THIRD_PARTY_NOTICES.md)
 
 </div>
 
 ![PointStudio 任务界面（演示任务）](docs/images/workspace.png)
-
+## 可以通过一条视频求解摄像机运动轨迹并绘制三维点云场景
 ## 功能
 - **便捷生成点云**：仅需一条视频，纯本地计算，即可在短时间内获得点云文件
 - **自动任务队列**：独立任务参数、上下箭头调整优先级、暂停后续任务、停止当前任务与失败重试。
@@ -25,7 +25,7 @@ Windows 桌面工具 · PySide6 / Qt 6 · **v1.0.1** · 2026-10-24
 | 项目 | 要求 |
 | --- | --- |
 | 系统 | Windows 10 / 11 x64 |
-| 显卡 | 兼容的 NVIDIA GPU 与驱动；当前没有完整的纯 CPU / AMD 重建模式 |
+| 显卡 | NVIDIA GPU 10系以上 |
 | Blender | 导出工程需要另行安装 Blender 4.0 或更新版本；已实测 4.2 与 5.2 |
 | 依赖 | 便携版附带 Python、Qt、PyTorch CUDA、FFmpeg 与求解器，无需另装 CUDA Toolkit |
 
