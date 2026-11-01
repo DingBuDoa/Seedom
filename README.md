@@ -117,6 +117,7 @@ GitHub 源码 ZIP 不包含 Python、Qt、CUDA 运行时、FFmpeg、COLMAP 或 G
 ## 开发者
 
 - [源码开发与发行构建](docs/DEVELOPMENT.md)
+- [参与贡献](CONTRIBUTING.md)
 - [行为准则](CODE_OF_CONDUCT.md)
 - [安全政策](SECURITY.md)
 - [更新记录](CHANGELOG.md)
