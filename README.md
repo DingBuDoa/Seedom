@@ -1,14 +1,15 @@
 # 拾点 VFX · SeedomVFX
 
-**把普通视频变成可在 Blender 中继续制作的相机运动与三维点云。**
+**把视频变成可在 Blender 中继续制作的相机运动与三维点云。**
 
-拾点 VFX 是一款面向 Windows 的本地摄影测量桌面工具。导入环绕拍摄的视频，选择重建方案并开始处理；软件会提取视频帧、估计相机运动并重建彩色点云，最后可将结果整理成 Blender 场景。
+拾点 VFX 是一款面向 Windows 的本地摄影测量桌面工具。导入拍摄的视频，选择重建方案并开始处理；软件会提取视频帧、估计相机运动并重建彩色点云，最后可将结果整理成 Blender 场景。
 
 [![最新版本](https://img.shields.io/github/v/release/DingBuDoa/Seedom?label=Release)](https://github.com/DingBuDoa/Seedom/releases)
 [![平台](https://img.shields.io/badge/platform-Windows-3978c5)](#运行要求)
 [![语言](https://img.shields.io/badge/interface-简体中文-36a269)](#)
 
-**普通用户：**前往 [GitHub Releases 下载 Windows 便携版](https://github.com/DingBuDoa/Seedom/releases)。本仓库的 **Code → Download ZIP** 是源码，不是可直接运行的安装包。
+**普通用户：**
+前往 [GitHub Releases 下载 Windows 便携版](https://github.com/DingBuDoa/Seedom/releases)。本仓库的 **Code → Download ZIP** 是源码，不是可直接运行的安装包。
 
 ## 软件界面
 
@@ -84,10 +85,10 @@ Blender 场景的背景会引用项目缓存中的图像。**移动或分享 `.b
 
 ## 运行要求
 
-- **操作系统：**Windows 10/11 x64。
-- **GPU 加速：**需要兼容的 NVIDIA 显卡和正常工作的 NVIDIA 驱动；便携包包含所需 CUDA 运行时组件，不需要安装 CUDA Toolkit。显卡显存需求与视频长度、分辨率和匹配规模有关，无法对所有素材给出统一的最低值。
-- **Blender 导出：**Blender 4.0 或更新版本，需单独安装。只做重建不要求安装 Blender。
-- **磁盘空间：**视频帧、数据库、日志和项目缓存会占用额外空间，长视频或高分辨率素材尤其明显。
+- **操作系统：** Windows 10/11 x64。
+- **GPU 加速：** 需要兼容的 NVIDIA 显卡和正常工作的 NVIDIA 驱动；便携包包含所需 CUDA 运行时组件，不需要安装 CUDA Toolkit。显卡显存需求与视频长度、分辨率和匹配规模有关，无法对所有素材给出统一的最低值。
+- **Blender 导出：** Blender 4.0 或更新版本，需单独安装。只做重建不要求安装 Blender。
+- **磁盘空间：** 视频帧、数据库、日志和项目缓存会占用额外空间，长视频或高分辨率素材尤其明显。
 
 如果 GLOMap 因设备或驱动问题退回 CPU，计算会明显变慢；软件会记录或提示回退情况。FastMap 的长轨迹处理采用分块方式降低临时显存峰值，但大场景仍可能超出机器资源。
 
