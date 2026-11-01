@@ -1,0 +1,39 @@
+name: 提出功能建议
+description: 描述你希望拾点 VFX 支持的能力及其用途
+title: "[建议] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        请先搜索已有 Issue，看看是否已有相同或相近的建议。请聚焦你遇到的问题和希望改善的工作流程。
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到什么问题？
+      description: 描述当前工作流程中不方便、耗时或无法完成的部分。
+      placeholder: 当我……时，目前无法……
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望增加什么？
+      description: 描述期望的行为或结果；不需要预先设计具体实现。
+      placeholder: 我希望软件能够……
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: 使用场景
+      description: 说明这个功能会在什么情况下使用，以及能带来什么帮助。
+      placeholder: 例如，在……工作流程中……
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 目前的替代方法或补充信息（可选）
+      description: 可以写出现有绕行方式、相关工具或其他背景。
+    validations:
+      required: false

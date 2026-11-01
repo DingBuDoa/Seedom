@@ -1,0 +1,72 @@
+name: 报告问题
+description: 报告拾点 VFX 中可复现的错误或异常行为
+title: "[问题] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提交前请搜索已有 Issue，避免重复报告。请勿上传私人视频、项目文件或包含个人信息的完整日志。安全漏洞请通过 [私密安全报告](https://github.com/DingBuDoa/Seedom/security/advisories/new) 提交，不要公开发布。
+  - type: input
+    id: app-version
+    attributes:
+      label: 软件版本
+      description: 可在软件“关于”页面或发行包名称中查看。
+      placeholder: "例如：1.1.0"
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows 版本
+      description: 请填写 Windows 10/11 及版本号（如知道）。
+      placeholder: "例如：Windows 11 24H2"
+    validations:
+      required: true
+  - type: dropdown
+    id: solver
+    attributes:
+      label: 求解方案
+      options:
+        - FastMap
+        - GLOMap（GPU）
+        - GLOMap（CPU）
+        - 不确定 / 尚未运行到求解阶段
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题描述
+      description: 简要说明发生了什么，以及大致在哪个操作或阶段出现。
+      placeholder: 清楚描述问题现象……
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 按顺序描述触发问题的操作；如果无法稳定复现，也请说明。
+      placeholder: |
+        1. 打开……
+        2. 选择……
+        3. 点击……
+    validations:
+      required: true
+  - type: textarea
+    id: expected-actual
+    attributes:
+      label: 预期结果与实际结果
+      description: 说明你原本预期看到什么，以及实际发生了什么。
+      placeholder: |
+        预期：
+        实际：
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志或截图（可选）
+      description: 仅粘贴相关片段。提交前请移除用户名、私人路径、访问令牌和其他个人信息；不要上传私人素材。
+      render: text
+    validations:
+      required: false

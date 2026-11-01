@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: 报告安全漏洞
+    url: https://github.com/DingBuDoa/Seedom/security/advisories/new
+    about: 请使用私密安全报告，不要在公开 Issue 中披露漏洞细节。
+  - name: 查看开发与贡献说明
+    url: https://github.com/DingBuDoa/Seedom/blob/main/CONTRIBUTING.md
+    about: 了解如何准备开发环境、运行测试和提交 Pull Request。
