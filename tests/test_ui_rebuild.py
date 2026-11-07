@@ -550,6 +550,8 @@ class DesktopTests(unittest.TestCase):
         bar = window.table.horizontalScrollBar()
         bar.setValue(bar.maximum())
         self.app.processEvents()
+        QTest.qWait(60)
+        self.app.processEvents()
         self.assertTrue(overlay.isVisible())
         self.assertEqual(overlay.width(), overlay.WIDTH)
         self.assertEqual(overlay.geometry().left(), window.table.geometry().right() + 1)
@@ -583,7 +585,7 @@ class DesktopTests(unittest.TestCase):
                 window.showNormal()
                 window.resize(*next(sizes))
             self.app.processEvents()
-            QTest.qWait(30)
+            QTest.qWait(60)
             self.app.processEvents()
             table_bar = window.table.verticalScrollBar()
             rail = window.table_vscroll
@@ -597,9 +599,15 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(rail.geometry().right(), window.table_area.rect().right())
             self.assertEqual(window.sticky_actions.geometry().top(), window.table_area.rect().top())
             self.assertEqual(window.sticky_actions.geometry().height(), window.table_area.height())
-            header_bottom = window.table.horizontalHeader().mapTo(
-                window.table_area, QPoint(0, window.table.horizontalHeader().height())).y()
-            self.assertGreaterEqual(window.sticky_actions.row_rect(0).top(), header_bottom)
+            header = window.table.horizontalHeader()
+            expected_header_bottom = header.mapTo(
+                window.table_area, QPoint(0, header.height())).y() - window.sticky_actions.y()
+            self.assertEqual(window.sticky_actions.header_bottom(), expected_header_bottom)
+            cell = window.table.visualRect(window.table.model().index(0, 0))
+            expected_row_top = window.table.viewport().mapTo(
+                window.table_area, cell.topLeft()).y() - window.sticky_actions.y()
+            self.assertEqual(window.sticky_actions.row_rect(0).top(), expected_row_top)
+            self.assertGreaterEqual(expected_row_top, expected_header_bottom)
 
     def test_selected_row_highlight_fills_gap_before_pinned_actions(self):
         window = self.window

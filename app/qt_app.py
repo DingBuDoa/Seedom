@@ -144,17 +144,24 @@ class StickyActions(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(True)
 
+    def map_from_table(self, widget, point):
+        parent_point = widget.mapTo(self.parentWidget(), point)
+        return self.mapFromParent(parent_point)
+
+    def header_bottom(self):
+        header = self.table.horizontalHeader()
+        return self.map_from_table(header, QPoint(0, header.height())).y()
+
     def row_rect(self, row_number):
         index = self.table.model().index(row_number, 0)
         rect = self.table.visualRect(index)
-        top = self.table.viewport().mapTo(self, rect.topLeft()).y()
+        top = self.map_from_table(self.table.viewport(), rect.topLeft()).y()
         return QRect(0, top, self.width(), rect.height())
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor('#ffffff'))
-        header = self.table.horizontalHeader()
-        header_bottom = header.mapTo(self, QPoint(0, header.height())).y()
+        header_bottom = self.header_bottom()
         painter.fillRect(0, 0, self.width(), header_bottom, QColor('#fafbfc'))
         action_left = 0
         painter.setPen(QColor('#e3e5e9'))
@@ -196,7 +203,7 @@ class StickyActions(QWidget):
         self.update()
 
     def mousePressEvent(self, event):
-        if event.position().toPoint().y() < self.table.horizontalHeader().height():
+        if event.position().toPoint().y() < self.header_bottom():
             event.accept(); return
         super().mousePressEvent(event)
 
