@@ -73,6 +73,7 @@ class TaskProgress:
         self.detail = ''
         self.durations = {}
         self.estimate = None
+        self.phase_estimates = {}
         self.frames = None
         self.ba_round = 0
         self.rate_kind = None
@@ -118,6 +119,7 @@ class TaskProgress:
                           phase_started=self.phase_started, task_started=self.started,
                           counter_started=self.counter_started, sampled_at=self.sampled_at,
                           last_log=self.last_log, estimate=self.estimate,
+                          phase_estimate=self.phase_estimates.get(key),
                           overall=min(.999, self.overall))
 
     def coarse(self, index, text):
@@ -269,26 +271,35 @@ def live_remaining(event, now=None, last_log=None):
     if quiet >= 15:
         notes.append(f'{clock_text(quiet)} 未收到新日志（等待求解器输出）')
     estimate = event.get('estimate')
-    if estimate and event.get('phase') != 'blender':
+    has_total_estimate = bool(estimate and event.get('phase') != 'blender')
+    if has_total_estimate:
         spent = max(0, now - event['task_started'])
         lower, upper = estimate['lower'] - spent, estimate['upper'] - spent
         if upper > 0:
             notes.append(f'本任务剩余约 {clock_text(max(0, lower))}–{clock_text(upper)}（本机历史粗估，不含 Blender）')
         else:
             notes.append('已超出原估时，正在等待新进度')
-    else:
-        current, total = event.get('current'), event.get('total')
-        sampled_at = event.get('sampled_at', now)
-        measured = max(0, sampled_at - event.get('counter_started', event['phase_started']))
-        if current and total and 0 < current < total and measured >= 2 and now - sampled_at < 30:
-            remaining = measured / current * (total - current)
-            since = max(0, now - sampled_at)
-            if remaining * 1.5 > since:
-                notes.append(f'本阶段剩余约 {clock_text(max(0, remaining * .7 - since))}–{clock_text(remaining * 1.5 - since)}（按当前速度）')
-            else:
-                notes.append('剩余时间：等待下一次进度更新')
-        elif current == total and total:
-            notes.append('计数已完成，等待本阶段收尾')
+    current, total = event.get('current'), event.get('total')
+    sampled_at = event.get('sampled_at', now)
+    measured = max(0, sampled_at - event.get('counter_started', event['phase_started']))
+    phase_estimate = event.get('phase_estimate') if event.get('phase') != 'blender' else None
+    since = max(0, now - sampled_at)
+    remaining = measured / current * (total - current) if current and total and 0 < current < total else None
+    if remaining is not None and measured >= 2 and since < 30 and remaining * 1.5 > since:
+        notes.append(f'本阶段剩余约 {clock_text(max(0, remaining * .7 - since))}–{clock_text(remaining * 1.5 - since)}（按当前速度）')
+    elif current == total and total:
+        notes.append('计数已完成，等待本阶段收尾')
+    elif phase_estimate:
+        lower, upper = phase_estimate['lower'] - elapsed, phase_estimate['upper'] - elapsed
+        if upper > 0:
+            notes.append(f'本阶段剩余约 {clock_text(max(0, lower))}–{clock_text(upper)}（本机阶段历史粗估，{phase_estimate["samples"]} 次参考）')
+        else:
+            notes.append('本阶段已超出历史估时，仍在等待求解器完成')
+    elif not has_total_estimate:
+        if remaining is not None:
+            notes.append('剩余时间：等待下一次进度更新')
+        elif event.get('phase') in ('positioning', 'ba', 'final_ba', 'distortion', 'matrices', 'focal', 'rotation', 'translation', 'epipolar'):
+            notes.append('剩余时间：等待收敛（无固定工作总量，暂无可比阶段记录）')
         else:
             notes.append('剩余时间：等待可用进度或本机参考记录')
     return ' · '.join(notes)

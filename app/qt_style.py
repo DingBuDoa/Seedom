@@ -17,10 +17,20 @@ QWidget { color: #1c1f26; font-family: "Microsoft YaHei UI"; font-size: 13px; }
 QMainWindow, QWidget#workspace { background: #f4f5f7; }
 QWidget#sidebar { background: #fbfbfc; border-right: 1px solid #e3e5e9; }
 QWidget#header, QWidget#detail, QDialog { background: white; }
+QWidget#detailSummary { background: transparent; }
+QWidget#recentLogsPanel { background: transparent; }
+QWidget#detailField { background: transparent; }
 QWidget#header { border-bottom: 1px solid #e3e5e9; }
 QLabel { background: transparent; border: none; }
 QLabel#title { font-size: 20px; font-weight: 600; }
 QLabel#sectionTitle { font-size: 15px; font-weight: 600; }
+QLabel#detailCaption { color: #89929f; font-size: 11px; }
+QLabel#detailValue { color: #28313d; font-size: 12px; }
+QLabel#detailStatus { background: #eaf0ff; color: #315fc5; border-radius: 9px; padding: 2px 8px; font-size: 11px; }
+QLabel#detailStatus[state="完成"] { background: #e8f5ee; color: #19734f; }
+QLabel#detailStatus[state="运行中"] { background: #fff4df; color: #94600b; }
+QLabel#detailStatus[state="失败"], QLabel#detailStatus[state="文件不完整"] { background: #fdeceb; color: #b43c35; }
+QLabel#detailMessage { color: #697382; font-size: 11px; }
 QLabel#muted { color: #8b939f; font-size: 12px; }
 QLabel#brand { font-family: "Segoe UI"; font-size: 18px; font-weight: 600; }
 QLabel#mark { background: transparent; }
@@ -54,6 +64,7 @@ QSpinBox, QDoubleSpinBox { padding-left: 12px; }
 QSpinBox QLineEdit, QDoubleSpinBox QLineEdit { border: none; padding: 0; background: transparent; }
 QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleSpinBox:focus { border-color: #2f6bff; }
 QLineEdit:read-only { background: #fafbfc; color: #626a76; }
+QPlainTextEdit#recentTaskLogs { background: #fafbfc; border: 1px solid #e3e5e9; border-radius: 5px; padding: 7px; color: #4d5868; font-size: 10px; }
 QComboBox:disabled, QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #f5f6f8; color: #a5adb9; }
 QComboBox { padding-right: 24px; }
 QComboBox::drop-down { width: 20px; border: none; }

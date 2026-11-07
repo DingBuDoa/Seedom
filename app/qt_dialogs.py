@@ -7,7 +7,7 @@ import threading
 from PySide6.QtCore import QTimer, Qt
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit,
     QPushButton, QComboBox, QCheckBox, QFormLayout, QGroupBox, QScrollArea, QWidget,
-    QDoubleSpinBox, QSpinBox, QPlainTextEdit, QFileDialog)
+    QDoubleSpinBox, QSpinBox, QPlainTextEdit, QFileDialog, QSizePolicy, QFrame)
 
 from tracker_core import Options, Pipeline, VIDEO_EXTENSIONS
 from workload import video_info
@@ -30,6 +30,12 @@ def button(text, callback, primary=False):
         result.setObjectName('primary')
     result.clicked.connect(callback)
     return result
+
+
+def add_blender_record(combo, record):
+    version = str(record.get('version') or Path(record.get('path', '')).parent.name)
+    combo.addItem(version, record)
+    combo.setItemData(combo.count() - 1, record.get('path', ''), Qt.ItemDataRole.ToolTipRole)
 
 
 class VideoInput(QPlainTextEdit):
@@ -89,9 +95,10 @@ class TaskDialog(QDialog):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         body = QWidget()
         layout = QVBoxLayout(body)
-        layout.setContentsMargins(24, 0, 24, 16)
+        layout.setContentsMargins(18, 0, 18, 16)
         scroll.setWidget(body)
         root.addWidget(scroll, 1)
         basic = QGroupBox('基本信息')
@@ -174,11 +181,16 @@ class TaskDialog(QDialog):
         form.addRow(self.blend)
         self.blender_group = QGroupBox('Blender 导出设置（首次启动会自动缓存版本）')
         blender_form = QFormLayout(self.blender_group)
+        blender_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.blender_note = label(f'检测到 {len(self.blender_records)} 个 Blender 版本。' if self.blender_records else '正在检测本机 Blender；完成后会显示版本列表。')
         blender_form.addRow('', self.blender_note)
         self.blender_version = QComboBox()
+        self.blender_version.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.blender_version.setMinimumContentsLength(18)
+        self.blender_version.setMinimumWidth(0)
+        self.blender_version.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         for record in self.blender_records:
-            self.blender_version.addItem(f"{record['version']}  |  {record['path']}", record)
+            add_blender_record(self.blender_version, record)
         self.current_blender = (job or {}).get('blender') or {}
         preferred = self.current_blender.get('path') or self.blender_settings.get('blender_path')
         preferred_index = next((i for i, record in enumerate(self.blender_records)
@@ -334,7 +346,7 @@ class TaskDialog(QDialog):
         self.blender_records[:] = records
         self.blender_version.clear()
         for record in self.blender_records:
-            self.blender_version.addItem(f"{record['version']}  |  {record['path']}", record)
+            add_blender_record(self.blender_version, record)
         index = next((i for i, record in enumerate(self.blender_records)
                       if record['path'].casefold() == str(preferred or '').casefold()), 0 if self.blender_records else -1)
         self.blender_version.setCurrentIndex(index)
@@ -481,10 +493,26 @@ class BlenderDialog(QDialog):
         self.opening = opening
         layout = QVBoxLayout(self); layout.setContentsMargins(24, 20, 24, 20); layout.setSpacing(12)
         record = settings.get('_blender_record') or {}
-        layout.addWidget(label(record.get('version', '未检测到 Blender'), 'sectionTitle'))
-        path_note = label(record.get('path', '启动后将自动扫描并缓存本机 Blender 版本。'))
-        path_note.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(path_note)
+        records = list(settings.get('blender_records') or [])
+        if record.get('path') and not any(
+                str(item.get('path', '')).casefold() == str(record['path']).casefold()
+                for item in records):
+            records.append(record)
+        self.blender_version = QComboBox()
+        self.blender_version.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.blender_version.setMinimumContentsLength(18)
+        self.blender_version.setMinimumWidth(0)
+        self.blender_version.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        for item in records:
+            add_blender_record(self.blender_version, item)
+            if str(item.get('path', '')).casefold() == str(record.get('path', '')).casefold():
+                self.blender_version.setCurrentIndex(self.blender_version.count() - 1)
+        version_form = QFormLayout()
+        version_form.addRow('Blender 版本', self.blender_version)
+        layout.addLayout(version_form)
+        layout.addWidget(label(f'检测到 {len(records)} 个 Blender 版本，悬停可查看程序路径。'
+                               if records else '未检测到 Blender，请在设置中添加或重新扫描。'))
         self.mesh = QCheckBox('同时生成可编辑网格（用于几何节点及渲染）'); self.mesh.setChecked(settings.get('blender_as_mesh', True))
         self.points = QCheckBox('显示彩色点（工程内保存颜色，无需额外安装插件）'); self.points.setChecked(settings.get('blender_draw_points', True))
         self.background = QCheckBox('预览和渲染使用抽帧背景'); self.background.setChecked(settings.get('blender_background_images', True))
@@ -506,13 +534,13 @@ class BlenderDialog(QDialog):
         layout.addStretch()
         row = QHBoxLayout(); row.addStretch(); row.addWidget(button('取消', self.reject))
         self.confirm = button('打开文件' if opening else '确认导出设置', self.accept_settings, True)
-        self.confirm.setEnabled(bool(record.get('path')))
+        self.confirm.setEnabled(bool((self.blender_version.currentData() or {}).get('path')))
         row.addWidget(self.confirm); layout.addLayout(row)
         inset_numeric_fields(self)
 
     def accept_settings(self):
-        record = self.settings.get('_blender_record')
-        if not record:
+        record = self.blender_version.currentData()
+        if not record or not record.get('path'):
             return
         if not self.opening and not self.mesh.isChecked() and not self.points.isChecked():
             return

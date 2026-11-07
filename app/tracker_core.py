@@ -46,13 +46,14 @@ class Options:
     export_sequence: bool = False
     sequence_original: bool = False
     solver_quality: str = 'balanced'
+    gpu_index: int = 0
 
     def validate(self):
         for key in ('fps', 'image_scale'):
             value = getattr(self, key)
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError(f'{key} 必须是有限数值')
-        for key in ('max_size', 'overlap', 'gpu_min_images'):
+        for key in ('max_size', 'overlap', 'gpu_min_images', 'gpu_index'):
             if type(getattr(self, key)) is not int:
                 raise ValueError(f'{key} 必须是整数')
         for key in ('cuda_decode', 'color', 'glomap_gpu', 'export_sequence', 'sequence_original'):
@@ -69,6 +70,8 @@ class Options:
             raise ValueError('抽帧率、图像尺寸或匹配范围超出允许范围')
         if not 2 <= self.gpu_min_images <= 1000000:
             raise ValueError('GLOMAP GPU 最少图像数需要不小于 2')
+        if self.gpu_index < 0:
+            raise ValueError('GPU 编号不能小于 0')
         if not 0.1 <= self.image_scale <= 1:
             raise ValueError('处理分辨率比例需要在 0.1 到 1 之间')
         return self
@@ -120,6 +123,10 @@ class Pipeline:
 
     def observe_glomap_output(self, line):
         if self.options.backend == 'glomap' and self.options.glomap_gpu and 'falling back' in line.casefold():
+            self.progress.estimate = None
+            self.progress.phase_estimates = {}
+            if self.progress.key:
+                self.progress.begin(self.progress.key, force=True)
             self.warn_solver('cpu_fallback', 'GLOMap 已回退到 CPU，任务将继续求解和导出，处理速度可能降低。')
 
     def observe_fastmap_output(self, line):
@@ -384,7 +391,7 @@ class Pipeline:
         else:
             args = [find_binary('03 FFMPEG', 'ffmpeg.exe'), '-hide_banner', '-loglevel', 'error', '-stats', '-y']
             if o.cuda_decode:
-                args += ['-hwaccel', 'cuda']
+                args += ['-hwaccel', 'cuda', '-hwaccel_device', str(o.gpu_index)]
             args += ['-i', video, '-map', '0:v:0', '-an']
             filters = video_filters(o)
             if filters:
@@ -396,7 +403,8 @@ class Pipeline:
                 if not o.cuda_decode:
                     raise
                 self.emit('log', text='[提示] CUDA 解码失败，改用 CPU 解码；求解设置不变。\n')
-                args = [a for a in args if str(a) not in ('-hwaccel', 'cuda')]
+                index = args.index('-hwaccel')
+                del args[index:index + 4]
                 self.command(args, '01-frames-cpu')
             count = sum(1 for _ in images.glob('frame_*.jpg'))
             if count < 3:
@@ -408,7 +416,11 @@ class Pipeline:
         task_started = time.perf_counter()
         self.preflight()
         o = self.options
-        hardware = get_hardware(o.python, force=True)
+        hardware = get_hardware(o.python, force=True, gpu_index=o.gpu_index)
+        if not any(device['index'] == o.gpu_index for device in hardware.get('devices', [])):
+            raise RuntimeError(f'所选 GPU {o.gpu_index} 不可用，请在设置中重新检测并选择显卡。')
+        if o.backend == 'fastmap' and not hardware.get('cuda_usable'):
+            raise RuntimeError(f'所选 GPU {o.gpu_index} 无法执行 CUDA：' + hardware.get('error', '请检查驱动与运行环境。'))
         self.check_cancel()
         self.emit('log', text='[硬件] ' + describe_hardware(hardware) + '\n')
         # Metadata collection must not prevent a valid native-solver run.
@@ -420,8 +432,9 @@ class Pipeline:
             self.workload = workload
             self.progress.frames = round(workload['frames'])
             try:
-                from estimate import prediction_range
+                from estimate import prediction_range, phase_prediction_ranges
                 self.progress.estimate = prediction_range(workload, o, hardware)
+                self.progress.phase_estimates = phase_prediction_ranges(workload, o, hardware)
             except Exception:
                 pass
         if existing_scene:
@@ -439,8 +452,9 @@ class Pipeline:
             workload = self.workload or workload
             if workload:
                 try:
-                    from estimate import prediction_range
+                    from estimate import prediction_range, phase_prediction_ranges
                     self.progress.estimate = prediction_range(workload, o, hardware)
+                    self.progress.phase_estimates = phase_prediction_ranges(workload, o, hardware)
                 except Exception:
                     pass
             cache = cache_directory(scene)
@@ -454,12 +468,12 @@ class Pipeline:
         elif not ((cache / '.features-complete').exists() and database.is_file()):
             self.command([colmap, 'feature_extractor', '--database_path', database, '--image_path', images,
                           '--ImageReader.single_camera', '1', '--SiftExtraction.use_gpu', '1',
-                          '--SiftExtraction.gpu_index', '0', '--SiftExtraction.max_image_size', str(o.max_size)], '02-features')
+                          '--SiftExtraction.gpu_index', str(o.gpu_index), '--SiftExtraction.max_image_size', str(o.max_size)], '02-features')
             (cache / '.features-complete').write_text('complete', encoding='utf-8')
         self.emit('stage', index=3, total=5, text='GPU 序列匹配')
         if not shared_ready and not (cache / '.matching-complete').exists():
             self.command([colmap, 'sequential_matcher', '--database_path', database,
-                          '--SiftMatching.use_gpu', '1', '--SiftMatching.gpu_index', '0',
+                          '--SiftMatching.use_gpu', '1', '--SiftMatching.gpu_index', str(o.gpu_index),
                           '--SequentialMatching.overlap', str(o.overlap)], '03-matching')
             (cache / '.matching-complete').write_text('complete', encoding='utf-8')
         counts = database_counts(database)
@@ -472,7 +486,7 @@ class Pipeline:
         started = time.perf_counter()
         gpu_solver_active = o.backend == 'fastmap'
         if o.backend == 'fastmap':
-            args = [o.python, '-u', APP / 'fastmap_worker.py', '--device', 'cuda:0',
+            args = [o.python, '-u', APP / 'fastmap_worker.py', '--device', f'cuda:{o.gpu_index}',
                     '--headless', '--database', database, '--output_dir', result,
                     '--solver-quality', o.solver_quality]
             if o.color:
@@ -495,9 +509,12 @@ class Pipeline:
             env = None
             if o.glomap_gpu:
                 env = {'PATH': str(glomap.parent) + os.pathsep + runtime_environment()['PATH']}
-                self.command([find_binary(folder, 'gpu_solver_probe.exe')], '04-gpu-preflight', env=env)
+                visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
+                selected_device = visible[o.gpu_index].strip() if len(visible) > o.gpu_index and visible[o.gpu_index].strip() else str(o.gpu_index)
+                self.command([find_binary(folder, 'gpu_solver_probe.exe')], '04-gpu-preflight',
+                             env={**env, 'CUDA_VISIBLE_DEVICES': selected_device})
                 for stage in ('GlobalPositioning', 'BundleAdjustment'):
-                    args += [f'--{stage}.use_gpu', '1', f'--{stage}.gpu_index', '0',
+                    args += [f'--{stage}.use_gpu', '1', f'--{stage}.gpu_index', str(o.gpu_index),
                              f'--{stage}.min_num_images_gpu_solver', str(o.gpu_min_images)]
             else:
                 args += ['--GlobalPositioning.use_gpu', '0', '--BundleAdjustment.use_gpu', '0']

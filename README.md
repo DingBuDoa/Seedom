@@ -11,6 +11,10 @@
 **普通用户：**
 前往 [GitHub Releases 下载 Windows 便携版](https://github.com/DingBuDoa/Seedom/releases)。本仓库的 **Code → Download ZIP** 是源码，不是可直接运行的安装包。
 
+1.1.1 起支持在“设置 → 软件更新”检查 GitHub、下载热补丁并安装重启，可关闭启动自动检查。
+1.1.0 用户需先手动安装 1.1.1 热补丁一次。个人设置、任务记录、耗时参考和项目文件保留；更新会备份被替换文件。
+后续发布使用统一的 ZIP 热补丁和 `update.json`，见 [更新发布标准](UPDATE-STANDARD.md)。
+
 ## 软件界面
 
 ![拾点 VFX 任务工作区](docs/images/workspace.png)

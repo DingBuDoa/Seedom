@@ -6,6 +6,9 @@
 /output/
 /outputs/
 /backups/
+/.updates/
+/patch-backups/
+/HOTFIX-INSTALLED.json
 /tests/artifacts/*
 !/tests/artifacts/.gitkeep
 

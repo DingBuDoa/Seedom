@@ -17,18 +17,18 @@ from tracker_core import Options, Pipeline
 from task_queue import TaskQueue
 from task_progress import TaskProgress, FASTMAP_STAGES, stage_plan, live_remaining
 from fastmap_progress import install_progress_reporting
-from estimate import prediction_range, estimate_jobs
+from estimate import prediction_range, phase_prediction_ranges, estimate_jobs
 from hardware import settings_signature
 from qt_app import MainWindow, configure_application
 from PySide6.QtWidgets import QApplication
 
 
 class ProgressTests(unittest.TestCase):
-    def tracker(self, options=None):
+    def tracker(self, options=None, blender=False):
         self.now = 100.0
         self.events = []
         return TaskProgress(options or Options(), lambda kind, **data: self.events.append(dict(type=kind, **data)),
-                            clock=lambda: self.now)
+                            clock=lambda: self.now, blender=blender)
 
     def feed(self, tracker, label, lines):
         for line in lines:
@@ -163,6 +163,65 @@ class ProgressTests(unittest.TestCase):
             text = estimate_jobs([dict(path='clip.mp4', scene=False, project_dir='existing')], options)
         describe.assert_called_once_with('clip.mp4', options, False, 'existing')
         self.assertIn('参考', text)
+
+    def test_phase_history_reuses_solver_timings_across_preparation_settings(self):
+        options = Options(backend='glomap', fps=30, export_sequence=True)
+        old_options = replace(options, fps=0, export_sequence=False, cuda_decode=False)
+        work = dict(frames=100, stages={'extract': True, 'features': True, 'matching': True},
+                    existing_scene=False, width=1920, height=1080, codec='h264', pairs=None)
+        sample = dict(schema=2, backend='glomap-gpu', frames=100, seconds=400,
+                      hardware_key='local', settings=settings_signature(old_options),
+                      workload=dict(work, codec='hevc', stages={'extract': False}, existing_scene=True),
+                      gpu_solver_active=True, phase_seconds={'final_ba': 100, 'frames': 1})
+        hardware = {'fingerprint': 'local'}
+        self.assertIsNone(prediction_range(work, options, hardware, [sample]))
+        phases = phase_prediction_ranges(work, options, hardware, [sample])
+        self.assertEqual(phases['final_ba'], dict(lower=50, upper=200, samples=1))
+        self.assertNotIn('frames', phases)
+        for changed in (dict(sample, hardware_key='other'), dict(sample, gpu_solver_active=False),
+                        dict(sample, settings=settings_signature(replace(old_options, camera_mode='pinhole'))),
+                        dict(sample, settings=settings_signature(replace(old_options, image_scale=.5))),
+                        dict(sample, phase_seconds={'final_ba': float('nan')})):
+            self.assertEqual(phase_prediction_ranges(work, options, hardware, [changed]), {})
+        fast = Options(solver_quality='fast')
+        fast_sample = dict(sample, backend='fastmap', settings=settings_signature(fast))
+        self.assertEqual(phase_prediction_ranges(work, replace(fast, solver_quality='balanced'),
+                                                hardware, [fast_sample]), {})
+
+    def test_phase_history_counts_down_without_fixed_solver_counter(self):
+        tracker = self.tracker(Options(backend='glomap'), blender=True)
+        tracker.phase_estimates = {'final_ba': dict(lower=50, upper=200, samples=2)}
+        tracker.begin('final_ba')
+        event = self.events[-1]
+        self.assertIn('本阶段剩余约 00:20–02:50', live_remaining(event, now=130))
+        self.assertIn('2 次参考', live_remaining(event, now=130))
+        self.assertIn('本阶段已超出历史估时', live_remaining(event, now=310))
+        self.assertLess(event['overall'], 1)
+        tracker.estimate = dict(lower=300, upper=600)
+        tracker.begin('final_ba', current=1, total=4, rate_kind='steps', force=True)
+        event = self.events[-1]
+        event['sampled_at'] = 110
+        text = live_remaining(event, now=110)
+        self.assertIn('本任务剩余约', text)
+        self.assertIn('按当前速度', text)
+        self.assertNotIn('本机阶段历史', text)
+        tracker.begin('blender')
+        self.assertIsNone(self.events[-1]['phase_estimate'])
+        self.assertNotIn('历史粗估', live_remaining(self.events[-1], now=110))
+
+    def test_cpu_fallback_discards_gpu_time_estimates(self):
+        events = []
+        pipeline = Pipeline(Options(backend='glomap'), events.append)
+        pipeline.log_dir = ROOT / 'tests/artifacts'
+        pipeline.progress.estimate = dict(lower=100, upper=200)
+        pipeline.progress.phase_estimates = {'final_ba': dict(lower=50, upper=100, samples=1)}
+        pipeline.progress.begin('final_ba')
+        with patch.object(pipeline, 'warn_solver') as warning:
+            pipeline.observe_glomap_output('Falling back to CPU')
+        warning.assert_called_once()
+        event = [event for event in events if event['type'] == 'task_progress'][-1]
+        self.assertIsNone(event['estimate'])
+        self.assertIsNone(event['phase_estimate'])
 
     def test_fastmap_reporting_preserves_batches_and_reports_completed_work(self):
         output, actions = [], []

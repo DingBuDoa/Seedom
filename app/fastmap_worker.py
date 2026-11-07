@@ -74,24 +74,30 @@ def main():
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument('--database', required=True)
     parser.add_argument('--output_dir', required=True)
+    parser.add_argument('--device', default='cuda:0')
     from fastmap.optimization import configure, PROFILES
     parser.add_argument('--solver-quality', choices=PROFILES, default='balanced')
     args, remaining = parser.parse_known_args()
     optimization_policy = configure(args.solver_quality)
     # Strip adapter-only arguments before the upstream argparse entry point.
-    sys.argv = [str(FASTMAP / 'run.py'), *remaining, '--database', args.database, '--output_dir', args.output_dir]
+    sys.argv = [str(FASTMAP / 'run.py'), *remaining, '--device', args.device,
+                '--database', args.database, '--output_dir', args.output_dir]
     print('[OPTIMIZATION_POLICY] ' + json.dumps(optimization_policy), flush=True)
     if not torch.cuda.is_available():
         raise RuntimeError('CUDA-enabled PyTorch cannot access the GPU.')
+    device = torch.device(args.device)
+    if device.type != 'cuda':
+        raise ValueError('FastMap requires a CUDA device.')
+    torch.cuda.set_device(device)
     workers = max(1, min(2, int(os.environ.get('AUTOTRACKER_COLOR_WORKERS', '1'))))
     fastmap.color.cpu_count = lambda: workers + 1
     torch.set_num_threads(2)
     torch.manual_seed(42)
-    print(f'[GPU] FastMap / {torch.cuda.get_device_name(0)} / PyTorch {torch.__version__}', flush=True)
+    print(f'[GPU] FastMap / {device} / {torch.cuda.get_device_name(device)} / PyTorch {torch.__version__}', flush=True)
     print('[GPU] Custom kernels are optional; PyTorch fallback still executes CUDA tensors.', flush=True)
-    policy = configure_cuda(0)
+    policy = configure_cuda(device)
     # Test an actual CUDA kernel, including GPU architecture support.
-    assert (torch.ones(1, device='cuda:0') + 1).item() == 2
+    assert (torch.ones(1, device=device) + 1).item() == 2
     print(f"[GPU] Memory policy: total {policy['total_bytes']/2**30:.2f} GiB, free {policy['free_bytes']/2**30:.2f} GiB; "
           f"up to {policy['match_pairs']} matches per image-pair batch (single pairs stay intact); "
           f"{policy['equation_chunk']} normal-equation / {policy['sparse_batch']} triangulation chunk. "

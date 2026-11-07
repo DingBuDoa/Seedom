@@ -85,10 +85,52 @@ def prediction_range(workload, options, hardware, samples=None):
                 upper=max(median * high, max(predictions) * 1.2), samples=len(matching))
 
 
+def phase_prediction_ranges(workload, options, hardware, samples=None):
+    """Reuse solver timings independently of decoding, outputs and cache state."""
+    from task_progress import FASTMAP_STAGES, GLOMAP_STAGES
+    backend = 'fastmap' if options.backend == 'fastmap' else ('glomap-gpu' if options.glomap_gpu else 'glomap-cpu')
+    settings = settings_signature(options)
+    ignored = {'fps', 'cuda_decode', 'export_sequence', 'sequence_original'}
+    solver_settings = {key: value for key, value in settings.items() if key not in ignored}
+    samples = read_samples() if samples is None else samples
+    values = {}
+    phases = dict(FASTMAP_STAGES if options.backend == 'fastmap' else GLOMAP_STAGES)
+    for sample in samples:
+        if not isinstance(sample, dict) or not isinstance(sample.get('settings'), dict):
+            continue
+        if {key: value for key, value in sample['settings'].items() if key not in ignored} != solver_settings:
+            continue
+        old_work = sample.get('workload')
+        if not isinstance(old_work, dict):
+            continue
+        # These fields determine preparation cost, not the solver's phase cost.
+        solver_work = dict(workload, **{key: old_work.get(key)
+                           for key in ('stages', 'existing_scene', 'codec')})
+        if not comparable(dict(sample, settings=settings), backend,
+                          hardware.get('fingerprint'), settings, solver_work):
+            continue
+        timings = sample.get('phase_seconds')
+        if not isinstance(timings, dict):
+            continue
+        for phase in phases:
+            seconds = timings.get(phase)
+            if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds <= 0:
+                continue
+            values.setdefault(phase, []).append(seconds * workload['frames'] / sample['frames'])
+    result = {}
+    for phase, predictions in values.items():
+        predictions = predictions[-5:]
+        median = statistics.median(predictions)
+        low, high = (.5, 2.0) if len(predictions) < 3 else (.7, 1.5)
+        result[phase] = dict(lower=min(median * low, min(predictions) * .8),
+                             upper=max(median * high, max(predictions) * 1.2), samples=len(predictions))
+    return result
+
+
 def estimate_jobs(jobs, options):
     if not jobs:
         return '预估任务时长：添加视频后自动估算'
-    hardware = get_hardware(options.python)
+    hardware = get_hardware(options.python, gpu_index=options.gpu_index)
     if not hardware.get('fingerprint'):
         return '预估任务时长：暂不可用（硬件检测未完成或失败）'
     if not hardware.get('cuda_usable') and (options.backend == 'fastmap' or options.glomap_gpu):

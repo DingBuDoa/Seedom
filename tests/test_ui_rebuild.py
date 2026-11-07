@@ -20,13 +20,15 @@ from paths import runtime_environment, BINARY_DIRS
 os.environ.update(runtime_environment())
 from tracker_core import Options, Pipeline, Cancelled, video_filters
 from task_queue import TaskQueue
+from task_storage import restore_jobs
+from app_info import APP_VERSION
 from workload import source_signature, video_scene, video_info
 from hardware import settings_signature
 from project_library import ProjectLibrary
 from project_layout import create_project, safe_name, blend_filename
-from qt_app import MainWindow, configure_application
+from qt_app import DetailValueLabel, MainWindow, configure_application
 from qt_dialogs import TaskDialog, BlenderDialog
-from PySide6.QtWidgets import QApplication, QDialog, QLabel
+from PySide6.QtWidgets import QApplication, QDialog, QLabel, QGroupBox, QPushButton, QScrollArea, QWidget, QMessageBox
 from PySide6.QtGui import QColor
 from PySide6.QtCore import QTimer, Qt, QPoint
 from PySide6.QtTest import QTest
@@ -286,7 +288,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(window.tasks.jobs[iid]['state'], '完成')
         self.assertFalse(window.tasks.jobs[iid]['result']['gpu_solver_active'])
         self.assertIn('回退到 CPU', window.detail_info.text())
-        self.assertIn('拾点VFX（SeedomVFX） 1.1.0', window.windowTitle())
+        self.assertIn('拾点VFX（SeedomVFX） ' + APP_VERSION, window.windowTitle())
 
     def test_blender_export_progress_responsive_completion_and_cancel(self):
         window = self.window; project = create_project(self.temp.name, '导出响应验证')
@@ -434,10 +436,110 @@ class DesktopTests(unittest.TestCase):
                              window.search.mapTo(window, window.search.rect().center()).y())
         window.grab().save(str(self.artifacts / 'workspace-aligned.png'))
         window.nav_group.button(1).click(); self.app.processEvents()
-        control = window.default_controls['gpu_min_images']
-        form = control.parentWidget().layout(); title = form.labelForField(control)
-        self.assertGreaterEqual(control.x() - title.geometry().right(), 32)
+        self.assertEqual(set(window.default_controls), {'output_root', 'python', 'gpu_index'})
+        settings_groups = [group.title() for group in window.pages.widget(1).findChildren(QGroupBox)]
+        self.assertEqual(settings_groups, ['路径与环境', '软件更新', 'Blender 版本', '日志'])
+        self.assertFalse(any('保留策略' in child.text() or '清理过期' in child.text()
+                             for child in window.pages.widget(1).findChildren(QLabel)))
+        self.assertTrue(window.blender_add_button.text().startswith('添加 Blender 安装目录'))
+        blender_status = [child.text() for child in window.pages.widget(1).findChildren(QLabel)
+                          if child.text().startswith(('检测到 ', '启动时自动检测 '))]
+        self.assertEqual(len(blender_status), 1)
+        self.assertTrue(blender_status[0].startswith(('检测到 ', '启动时自动检测 ')))
+        self.assertFalse(any('默认 Blender FPS' in child.text() or '默认导出起始帧偏移' in child.text()
+                             for child in window.pages.widget(1).findChildren(QLabel)))
         window.grab().save(str(self.artifacts / 'settings-aligned.png'))
+        version_labels = [child.text() for child in window.findChildren(QLabel)
+                          if child.text().startswith('版本 ')]
+        self.assertIn('版本 ' + APP_VERSION, version_labels)
+
+    def test_gpu_selection_is_detected_saved_and_used_for_new_tasks(self):
+        window = self.window
+        profile = dict(cpu='Test CPU', system_label='Windows 11', gpu_index=0, cuda_usable=True,
+                       devices=[dict(index=0, name='NVIDIA GeForce RTX 3060', total_bytes=12 * 2**30),
+                                dict(index=1, name='NVIDIA GeForce RTX 4090', total_bytes=24 * 2**30)])
+        with patch('qt_app.get_hardware', side_effect=lambda *args, **kwargs: dict(profile, gpu_index=kwargs['gpu_index'])) as probe:
+            window.check_environment()
+            wait_until(lambda: window.gpu_choice.count() == 2, app=self.app)
+            self.assertIn('12.0 GiB', window.gpu_choice.itemText(0))
+            window.gpu_choice.setCurrentIndex(1)
+            wait_until(lambda: 'GPU 1: RTX 4090' in window.hardware_label.full_text, app=self.app)
+            self.assertEqual(probe.call_args.kwargs['gpu_index'], 1)
+        with patch.object(Pipeline, 'preflight'):
+            window.save_settings_clicked()
+        self.assertEqual(window.defaults.gpu_index, 1)
+        saved = json.loads(window.settings_path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['gpu_index'], 1)
+        iid = window.tasks.add(self.video, window.defaults, '所选显卡测试')
+        self.assertEqual(window.tasks.jobs[iid]['options']['gpu_index'], 1)
+        window.persist_tasks()
+        restored, warnings = restore_jobs(window.config_dir / 'task-queue.json')
+        self.assertFalse(warnings)
+        self.assertEqual(restored[iid]['options']['gpu_index'], 1)
+        window.nav_group.button(1).click(); self.app.processEvents()
+        window.grab().save(str(self.artifacts / 'settings-multiple-gpus.png'))
+        window.update_gpu_choices(dict(devices=[profile['devices'][0]]))
+        self.assertEqual(window.gpu_choice.currentData(), 1)
+        self.assertIn('未检测到', window.gpu_choice.currentText())
+
+    def test_update_ui_checks_downloads_and_installs_only_when_idle(self):
+        window = self.window
+        document = dict(version='1.1.2', notes='修复问题并改进界面。', package=dict(bytes=500000))
+        with patch('qt_updates.check_for_updates', return_value=dict(status='available', update=document)):
+            window.update_panel.check_updates()
+            wait_until(lambda: not window.update_panel.checking, app=self.app)
+        self.assertEqual(window.sidebar_update.text(), '更新至 1.1.2')
+        self.assertFalse(window.sidebar_update.isHidden())
+        self.assertTrue(window.update_panel.action.isEnabled())
+        window.tasks.running = True
+        package = Path(self.temp.name) / 'prepared-patch'; package.mkdir()
+        with patch('qt_updates.prepare_update', return_value=package):
+            window.update_panel.download_or_install()
+            wait_until(lambda: not window.update_panel.downloading, app=self.app)
+        self.assertEqual(window.update_panel.action.text(), '安装并重启')
+        self.assertFalse(window.update_panel.action.isEnabled())
+        with patch('qt_app.QMessageBox.question') as question:
+            window.install_update(package)
+            question.assert_not_called()
+        window.tasks.running = False; window.update_busy()
+        self.assertTrue(window.update_panel.action.isEnabled())
+        with patch('qt_app.QMessageBox.question', return_value=QMessageBox.StandardButton.No), \
+             patch('qt_app.subprocess.Popen') as start:
+            window.install_update(package)
+            start.assert_not_called()
+        with patch('qt_app.ROOT', Path(self.temp.name)), \
+             patch('qt_app.QMessageBox.question', return_value=QMessageBox.StandardButton.Yes), \
+             patch('hotfix.validate_package'), patch.object(window, 'close') as closed, \
+             patch('qt_app.subprocess.Popen') as start:
+            window.install_update(package)
+            args = start.call_args.args[0]
+            self.assertEqual(args[args.index('--wait-pid') + 1], str(os.getpid()))
+            self.assertEqual(args[args.index('--package') + 1], str(package))
+            self.assertTrue(Path(args[2]).is_file())
+            self.assertTrue((Path(args[2]).parent / 'hotfix.py').is_file())
+            closed.assert_called_once()
+        window.show_updates()
+        self.app.processEvents()
+        window.grab().save(str(self.artifacts / 'settings-update-ready.png'))
+        window.update_panel.automatic.setChecked(False)
+        with patch.object(Pipeline, 'preflight'):
+            window.save_settings_clicked()
+        self.assertFalse(json.loads(window.settings_path.read_text(encoding='utf-8'))['check_updates_on_startup'])
+
+    def test_manually_added_blender_directory_is_validated_and_persisted(self):
+        window = self.window
+        blender_dir = Path(self.temp.name) / 'Custom Blender'
+        blender_dir.mkdir()
+        executable = blender_dir / 'blender.exe'; executable.write_bytes(b'blender')
+        record = {'path': str(executable), 'version': 'Blender 5.2.0 Custom'}
+        with patch('qt_app.QFileDialog.getExistingDirectory', return_value=str(blender_dir)), \
+             patch('qt_app.probe_blender', return_value=record):
+            window.add_blender_directory()
+            wait_until(lambda: record in window.blender_records, app=self.app)
+        saved = json.loads((Path(self.temp.name) / 'settings.json').read_text(encoding='utf-8'))
+        self.assertIn(record, saved['blender_records'])
+        self.assertIn(str(executable), saved['blender_paths'])
+        self.assertEqual(saved['blender_path'], str(executable))
 
     def test_dialog_metadata_validation_and_actual_options(self):
         dialog = TaskDialog(self.window, Options(), paths=[self.video]); dialog.show()
@@ -448,7 +550,8 @@ class DesktopTests(unittest.TestCase):
         self.assertIsNone(dialog.result_data)
         dialog.rate.setCurrentIndex(3); dialog.custom_rate.setValue(12); dialog.scale.setCurrentIndex(2)
         dialog.sequence.setChecked(True); dialog.sequence_size.setCurrentIndex(1)
-        dialog.accept_task()
+        with patch.object(Pipeline, 'preflight'):
+            dialog.accept_task()
         self.assertEqual(dialog.result_data['options'].fps, 12)
         self.assertEqual(dialog.result_data['options'].image_scale, .5)
         self.assertTrue(dialog.result_data['options'].export_sequence)
@@ -468,7 +571,8 @@ class DesktopTests(unittest.TestCase):
         dialog.hide(); dialog.deleteLater()
 
     def test_task_blender_area_exposes_full_export_settings_and_frame_offset(self):
-        record = {'path': 'C:/Blender/blender.exe', 'version': 'Blender 4.2.15'}
+        long_path = 'C:/Program Files/Blender Foundation/Blender 5.2.0 DLSS Preview/custom build folder/blender.exe'
+        record = {'path': long_path, 'version': 'Blender 5.2.0 DLSS Preview'}
         defaults = {'blender_frame_start_offset': 0, 'blender_as_mesh': True,
                     'blender_draw_points': True, 'blender_background_images': True,
                     'blender_suppress_warnings': True, 'blender_point_radius': .005,
@@ -482,17 +586,25 @@ class DesktopTests(unittest.TestCase):
         dialog.blend.setChecked(True)
         self.assertFalse(dialog.blender_group.isHidden())
         self.assertEqual(dialog.blender_version.currentData(), record)
+        self.assertEqual(dialog.blender_version.currentText(), record['version'])
+        self.assertEqual(dialog.blender_version.currentData(Qt.ItemDataRole.ToolTipRole), long_path)
         self.assertTrue(any('第 31 帧' in widget.text()
                             for widget in dialog.blender_group.findChildren(QLabel)))
         dialog.show()
         wait_until(lambda: bool(dialog.metadata), app=self.app)
+        self.assertLessEqual(dialog.blender_version.width(), dialog.blender_group.width() - 32)
+        dialog.findChild(QScrollArea).verticalScrollBar().setValue(
+            dialog.findChild(QScrollArea).verticalScrollBar().maximum())
+        self.app.processEvents()
+        dialog.grab().save(str(self.artifacts / 'task-dialog-long-blender-path.png'))
         dialog.points.setChecked(False)
         dialog.background.setChecked(False)
         dialog.warnings.setChecked(False)
         dialog.radius.setValue(.0123)
         dialog.blender_fps.setValue(24)
         dialog.frame_start_offset.setValue(30)
-        dialog.accept_task()
+        with patch.object(Pipeline, 'preflight'):
+            dialog.accept_task()
         blender = dialog.result_data['blender']
         self.assertEqual(blender['frame_start_offset'], 30)
         self.assertEqual(blender['fps'], 24)
@@ -522,6 +634,37 @@ class DesktopTests(unittest.TestCase):
         self.assertFalse(dialog.result_data['background_images'])
         self.assertEqual(dialog.result_data['point_radius'], .02)
         dialog.deleteLater()
+
+    def test_manual_blender_export_uses_selected_version_and_remembers_it(self):
+        records = [
+            {'path': 'C:/Blender 4.2/blender.exe', 'version': 'Blender 4.2.15'},
+            {'path': 'C:/Program Files/Blender Foundation/Blender 5.2.0 DLSS Preview/custom build folder/blender.exe',
+             'version': 'Blender 5.2.0 DLSS Preview'},
+        ]
+        window = self.window
+        window.blender_records = records
+        window.config['blender_path'] = records[1]['path']
+
+        def choose_version(dialog):
+            self.assertEqual(dialog.blender_version.count(), 2)
+            self.assertEqual(dialog.blender_version.currentData(), records[1])
+            dialog.show(); self.app.processEvents()
+            self.assertLessEqual(dialog.blender_version.width(), dialog.width() - 48)
+            dialog.blender_version.showPopup(); self.app.processEvents()
+            dialog.grab().save(str(self.artifacts / 'manual-blender-version-selection.png'))
+            dialog.blender_version.hidePopup()
+            dialog.blender_version.setCurrentIndex(0)
+            self.assertEqual(dialog.blender_version.currentData(Qt.ItemDataRole.ToolTipRole), records[0]['path'])
+            dialog.accept_settings()
+            return dialog.result()
+
+        with patch.object(BlenderDialog, 'exec', choose_version):
+            chosen = window.choose_blender()
+        self.assertEqual(chosen['path'], records[0]['path'])
+        self.assertEqual(chosen['version'], records[0]['version'])
+        self.assertEqual(chosen['paths'], [record['path'] for record in records])
+        self.assertEqual(window.config['blender_path'], records[0]['path'])
+        self.assertEqual(blend_filename('测试导出', chosen['version']), '测试导出_4.2.blend')
 
     def test_task_dialog_centers_on_parent_and_fits_available_screen(self):
         dialog = TaskDialog(self.window, Options(), paths=[self.video])
@@ -554,17 +697,16 @@ class DesktopTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(overlay.isVisible())
         self.assertEqual(overlay.width(), overlay.WIDTH)
-        self.assertEqual(overlay.geometry().left(), window.table.geometry().right() + 1)
-        self.assertEqual(window.table_vscroll.geometry().left(), overlay.geometry().right() + 1)
-        self.assertEqual(window.table_vscroll.geometry().right(), window.table_area.width() - 1)
+        native_bar = window.table.verticalScrollBar()
+        native_bar_rect = native_bar.geometry().translated(native_bar.mapTo(window.table_area, QPoint(0, 0)))
+        self.assertLess(overlay.geometry().right(), native_bar_rect.left())
+        self.assertLessEqual(native_bar_rect.right(), window.table_area.width())
         self.assertGreater(bar.maximum(), 0)
         self.assertFalse(window.table.isColumnHidden(1))
         self.assertFalse(window.table.isColumnHidden(4))
         self.assertGreater(window.table.verticalScrollBar().maximum(), 0)
-        self.assertFalse(window.table.verticalScrollBar().isVisible())
-        self.assertTrue(window.table_vscroll.isVisible())
-        self.assertGreater(window.table_vscroll.maximum(), 0)
-        self.assertEqual(window.table_vscroll.pageStep(), window.table.verticalScrollBar().pageStep())
+        self.assertTrue(native_bar.isVisible())
+        self.assertGreater(native_bar.maximum(), 0)
         status_left = window.table.horizontalHeader().sectionViewportPosition(5)
         self.assertGreaterEqual(status_left, 0)
         self.assertLessEqual(status_left + window.table.columnWidth(5), window.table.viewport().width())
@@ -588,17 +730,13 @@ class DesktopTests(unittest.TestCase):
             QTest.qWait(60)
             self.app.processEvents()
             table_bar = window.table.verticalScrollBar()
-            rail = window.table_vscroll
             self.assertGreater(table_bar.maximum(), 0)
-            self.assertTrue(rail.isVisible())
-            self.assertEqual(rail.minimum(), table_bar.minimum())
-            self.assertEqual(rail.maximum(), table_bar.maximum())
-            self.assertEqual(rail.pageStep(), table_bar.pageStep())
-            self.assertEqual(rail.geometry().top(), window.table_area.rect().top())
-            self.assertEqual(rail.geometry().bottom(), window.table_area.rect().bottom())
-            self.assertEqual(rail.geometry().right(), window.table_area.rect().right())
-            self.assertEqual(window.sticky_actions.geometry().top(), window.table_area.rect().top())
-            self.assertEqual(window.sticky_actions.geometry().height(), window.table_area.height())
+            self.assertTrue(table_bar.isVisible())
+            self.assertEqual(window.sticky_actions.geometry().top(), window.table.geometry().top())
+            self.assertEqual(window.sticky_actions.geometry().height(), window.table.height())
+            table_bar_rect = table_bar.geometry().translated(table_bar.mapTo(window.table_area, QPoint(0, 0)))
+            self.assertLess(window.sticky_actions.geometry().right(), table_bar_rect.left())
+            self.assertLessEqual(table_bar_rect.right(), window.table_area.width())
             header = window.table.horizontalHeader()
             expected_header_bottom = header.mapTo(
                 window.table_area, QPoint(0, header.height())).y() - window.sticky_actions.y()
@@ -608,6 +746,43 @@ class DesktopTests(unittest.TestCase):
                 window.table_area, cell.topLeft()).y() - window.sticky_actions.y()
             self.assertEqual(window.sticky_actions.row_rect(0).top(), expected_row_top)
             self.assertGreaterEqual(expected_row_top, expected_header_bottom)
+            first_row = window.table.rowAt(0)
+            last_row = window.table.rowAt(window.table.viewport().height() - 1)
+            rail_image = window.sticky_actions.grab().toImage()
+            for row_number in range(first_row, last_row + 1):
+                row_rect = window.sticky_actions.row_rect(row_number)
+                icon_top = row_rect.top() + (row_rect.height() - 26) // 2 + 5
+                if icon_top < 0 or icon_top + 16 > rail_image.height():
+                    continue
+                for action_number in range(5):
+                    icon_left = 11 + action_number * 26
+                    pixels = sum(
+                        rail_image.pixelColor(x, y) != QColor('#ffffff')
+                        for x in range(icon_left, icon_left + 16)
+                        for y in range(icon_top, icon_top + 16)
+                        if 0 <= x < rail_image.width() and 0 <= y < rail_image.height())
+                    self.assertGreater(pixels, 0, f'row {row_number} action {action_number} is not painted')
+
+    def test_row_actions_render_when_rows_do_not_fill_viewport(self):
+        window = self.window
+        window.resize(1500, 1000); window.show(); self.app.processEvents()
+        for number in range(3):
+            window.tasks.add(self.video, Options(), f'空白视口工具栏测试 {number + 1}')
+        window.rebuild_rows(); self.app.processEvents()
+        table, rail = window.table, window.sticky_actions
+        self.assertGreater(table.viewport().height(), table.rowHeight(0) * table.model().rowCount())
+        self.assertEqual(table.rowAt(table.viewport().height() - 1), -1)
+        image = rail.grab().toImage()
+        for row_number in range(table.model().rowCount()):
+            row_rect = rail.row_rect(row_number)
+            icon_top = row_rect.top() + (row_rect.height() - 26) // 2 + 5
+            for action_number in range(5):
+                icon_left = 11 + action_number * 26
+                pixels = sum(
+                    image.pixelColor(x, y) != QColor('#ffffff')
+                    for x in range(icon_left, icon_left + 16)
+                    for y in range(icon_top, icon_top + 16))
+                self.assertGreater(pixels, 0, f'row {row_number} action {action_number} is missing')
 
     def test_selected_row_highlight_fills_gap_before_pinned_actions(self):
         window = self.window
@@ -620,7 +795,7 @@ class DesktopTests(unittest.TestCase):
         row_y = table.rowViewportPosition(0) + table.rowHeight(0) // 2
         action_y = window.sticky_actions.row_rect(0).center().y()
         header_bottom = table.horizontalHeader().mapTo(
-            window.table_area, QPoint(0, table.horizontalHeader().height())).y()
+            window.table_area, QPoint(0, table.horizontalHeader().height())).y() - window.sticky_actions.y()
         self.assertGreaterEqual(window.sticky_actions.row_rect(0).top(), header_bottom)
         viewport_image = table.viewport().grab().toImage()
         action_image = window.sticky_actions.grab().toImage()
@@ -632,13 +807,79 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(QColor(viewport_image.pixel(table.viewport().width() - 4, row_y)), QColor('#ffffff'))
         self.assertEqual(QColor(action_image.pixel(window.sticky_actions.width() - 4, action_y)), QColor('#ffffff'))
 
+    def test_detail_diagnostic_wraps_without_elision_or_vertical_clipping(self):
+        window = self.window
+        window.tasks.add(self.video, Options(), '求解提醒换行测试')
+        window.rebuild_rows(); window.table.selectRow(0)
+        message = ('FastMap · 完成 · 重投影误差 2.402 px · 求解提醒：'
+                   'FastMap 极线优化触及迭代上限，已保留当前求解结果。'
+                   '请检查相机轨迹和点云，必要时提高求解精度或增加拍摄移动范围。')
+        window.detail_info.setFullText(message)
+        heights = []
+        for width in (1360, 1020, 1360):
+            window.resize(width, 800)
+            QTest.qWait(30); self.app.processEvents()
+            note = window.detail_info
+            self.assertTrue(note.wordWrap())
+            self.assertEqual(note.text(), message)
+            self.assertGreaterEqual(note.height(), note.heightForWidth(note.width()))
+            self.assertTrue(note.parentWidget().rect().contains(note.geometry()))
+            heights.append(note.minimumHeight())
+        self.assertGreater(heights[1], heights[0])
+        self.assertEqual(heights[0], heights[2])
+        window.resize(1020, 680); QTest.qWait(30); self.app.processEvents()
+        window.grab().save(str(self.artifacts / 'detail-diagnostic-wrapped.png'))
+
     def test_unified_history_filters_persistence_and_responsive_ui(self):
         records, _ = ProjectLibrary().scan(str(ROOT / 'outputs'))
         self.window.records = {r['id']: r for r in records}
         iid = self.window.tasks.add(self.video, Options(fps=12, image_scale=.5), '回归测试 · ' + '长名称' * 30)
         self.window.rebuild_rows(); self.window.table.selectRow(0); self.app.processEvents()
         self.assertTrue(self.window.edit_button.isEnabled())
-        self.assertEqual(self.window.source_path.text(), str(self.video.resolve()))
+        self.assertEqual(self.window.source_path.toolTip(), str(self.video.resolve()))
+        self.assertEqual(self.window.processing_value.toolTip(), '12 fps / 0.5× · fastmap · SIFT 4096 · 匹配 15')
+        self.assertFalse(self.window.processing_value.wordWrap())
+        narrow_value = DetailValueLabel()
+        narrow_value.setFixedWidth(180)
+        narrow_value.setFullText('原始帧率 / 0.8× · GLOMap GPU · SIFT 4096 · 匹配 15')
+        self.assertTrue(narrow_value.text().endswith('…'))
+        self.assertLessEqual(narrow_value.fontMetrics().horizontalAdvance(narrow_value.text()),
+                             narrow_value.contentsRect().width())
+        self.assertEqual(self.window.output_content.text(), '待生成')
+        self.assertEqual(self.window.sequence_value.text(), '未输出')
+        self.assertEqual(self.window.detail_status.text(), '等待')
+        self.assertEqual(self.window.recent_logs.toPlainText(), '任务尚未开始，暂无日志。')
+        self.assertNotIn('launcher.log', self.window.recent_logs.toPlainText())
+        self.assertFalse(any(button.text() == '查看完整日志'
+                             for button in self.window.findChildren(QPushButton)))
+        self.assertIn('最近日志', self.window.recent_logs.parentWidget().findChildren(QLabel)[0].text())
+        self.assertTrue(self.window.remove_button.isEnabled())
+        fields = self.window.findChild(QWidget, 'detailSummary').findChildren(QWidget, 'detailField')
+        self.app.processEvents()
+        self.assertEqual(len(fields), 7)
+        self.assertGreaterEqual(fields[1].geometry().left(), fields[0].geometry().right())
+        self.assertEqual(fields[2].width(), fields[0].width())
+        self.assertGreaterEqual(fields[3].geometry().left(), fields[2].geometry().right())
+        self.assertGreaterEqual(fields[5].geometry().left(), fields[4].geometry().right())
+        for width in (1020, 1360):
+            self.window.resize(width, 680)
+            self.app.processEvents()
+            for field in fields:
+                value = field.findChild(DetailValueLabel)
+                self.assertGreaterEqual(value.height(), value.fontMetrics().height() + 4)
+                self.assertTrue(field.rect().contains(value.geometry()))
+                self.assertLessEqual(value.fontMetrics().horizontalAdvance(value.text()),
+                                     value.contentsRect().width())
+                self.assertTrue(field.parentWidget().rect().contains(field.geometry()))
+            self.assertGreaterEqual(self.window.detail_info.height(),
+                                    self.window.detail_info.fontMetrics().height() + 4)
+        self.window.grab().save(str(self.artifacts / 'detail-text-wrapped.png'))
+        selected_row = self.window.selected()
+        selected_row['exports'] = [str(Path(self.temp.name) / 'existing_5.2.blend')]
+        selected_row['result'] = {'model': str(Path(self.temp.name) / 'point could')}
+        with patch.object(self.window, 'selected', return_value=selected_row):
+            self.window.update_details()
+        self.assertEqual(self.window.output_content.text(), '点云 · existing_5.2.blend')
         self.window.filters.button(1).setChecked(True); self.window.apply_filter()
         self.assertEqual(self.window.proxy.rowCount(), 1)
         self.window.search.setText('不存在的关键词'); self.app.processEvents(); self.assertEqual(self.window.proxy.rowCount(), 0)
@@ -653,6 +894,65 @@ class DesktopTests(unittest.TestCase):
         wait_until(finished.is_set, app=self.app); timer.stop(); self.assertGreater(len(ticks), 5)
         self.window.resize(1020, 680); self.app.processEvents(); self.assertLessEqual(self.window.width(), 1020)
         self.window.grab().save(str(self.artifacts / 'workspace-small.png'))
+
+    def test_status_bar_shows_compact_hardware_and_keeps_probe_details_in_settings(self):
+        profile = dict(cpu='Intel(R) Core(TM) i7-14700K', system_label='Windows 11 25H2 (26200.1000)',
+                       devices=[dict(name='NVIDIA GeForce RTX 5070 Ti', total_bytes=16 * 2**30)],
+                       cuda_usable=True)
+        window = self.window
+        with patch('qt_app.get_hardware', return_value=profile), patch.object(window, 'schedule_estimate'):
+            window.check_environment()
+            wait_until(lambda: 'RTX 5070 Ti' in window.hardware_label.full_text, app=self.app)
+        self.assertIn('CPU: Intel Core i7-14700K', window.hardware_label.full_text)
+        self.assertIn('显存 16.0 GiB', window.hardware_label.full_text)
+        self.assertIn('Windows 11 25H2', window.hardware_label.full_text)
+        self.assertNotIn('实算', window.hardware_label.full_text)
+        self.assertNotIn('已构建', window.hardware_label.full_text)
+        self.assertIn('CUDA 实算通过', window.environment_info.text())
+        self.assertIn('CUDA 实算通过', window.hardware_label.toolTip())
+        for width in (1020, 1360):
+            window.resize(width, 680); self.app.processEvents()
+            self.assertLessEqual(window.hardware_label.fontMetrics().horizontalAdvance(window.hardware_label.text()),
+                                 window.hardware_label.contentsRect().width())
+            self.assertLess(window.hardware_label.geometry().right(), window.elapsed_label.geometry().left())
+        window.grab().save(str(self.artifacts / 'status-bar-hardware.png'))
+
+    def test_detail_header_keeps_status_next_to_short_and_long_names(self):
+        window = self.window
+        for width in (1020, 1360):
+            window.resize(width, 680)
+            for name in ('操场', '非常长的任务名称' * 30, '测试'):
+                window.detail_title.setFullText(name)
+                self.app.processEvents()
+                title = window.detail_title.geometry()
+                status = window.detail_status.geometry()
+                self.assertGreater(title.width(), 0)
+                self.assertEqual(status.left() - title.right() - 1, 8)
+                self.assertLess(status.right(), window.edit_button.geometry().left())
+                self.assertLessEqual(window.detail_title.fontMetrics().horizontalAdvance(window.detail_title.text()),
+                                     window.detail_title.contentsRect().width())
+        window.grab().save(str(self.artifacts / 'detail-header.png'))
+
+    def test_detail_summary_refreshes_when_selecting_another_project(self):
+        window = self.window
+        ids = [window.tasks.add(self.video, Options(fps=fps), name)
+               for fps, name in ((12, '项目甲'), (24, '项目乙'))]
+        first, second = ids
+        for iid, created, frames, points, seconds, sequence in (
+                (first, '2026-10-24T17:43:00', 776, 55133, 402, '/甲/video'),
+                (second, '2026-11-07T18:38:00', 120, 8021, 65, '')):
+            window.tasks.jobs[iid].update(state='完成', created_at=created,
+                result={'metrics': {'registered_images': frames, 'points': points},
+                        'task_wall_seconds': seconds, 'sequence': sequence})
+        window.rebuild_rows(); self.app.processEvents()
+        window.table.selectRow(0); self.app.processEvents()
+        self.assertEqual(window.created_value.text(), '2026-10-24 17:43')
+        self.assertIn('776 帧 / 55,133 点', window.duration_value.text())
+        self.assertEqual(window.sequence_value.text(), '已导出')
+        window.table.selectRow(1); self.app.processEvents()
+        self.assertEqual(window.created_value.text(), '2026-11-07 18:38')
+        self.assertIn('120 帧 / 8,021 点', window.duration_value.text())
+        self.assertEqual(window.sequence_value.text(), '未输出')
 
     def test_logs_and_three_navigation_pages(self):
         for index in range(3):

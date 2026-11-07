@@ -29,7 +29,7 @@ def source_link(text, url, object_name='aboutLink'):
     return link
 
 
-def about_page(open_path):
+def about_page(open_path, check_updates=None):
     page = QWidget(); page.setObjectName('workspace')
     layout = QVBoxLayout(page); layout.setContentsMargins(0,0,0,0); layout.setSpacing(0)
     header = QWidget(); header.setObjectName('header')
@@ -91,6 +91,8 @@ def about_page(open_path):
     content.addWidget(label('Blender 由本机安装版本提供。各开源组件的原始许可随组件保留。', 'aboutFootnote'))
     content.addSpacing(17)
     actions = QHBoxLayout(); actions.setSpacing(10); actions.addStretch()
+    if check_updates:
+        actions.addWidget(button('检查更新', check_updates, True))
     actions.addWidget(button('查看使用说明', lambda: open_path(ROOT / 'README.md')))
     actions.addWidget(button('打开软件目录', lambda: open_path(ROOT)))
     actions.addStretch(); content.addLayout(actions)

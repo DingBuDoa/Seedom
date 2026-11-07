@@ -102,14 +102,14 @@ class HotfixTests(unittest.TestCase):
         from PySide6.QtWidgets import QApplication, QLabel
         from qt_about import about_page
         from qt_app import configure_application
-        from app_info import PROJECT_URL
+        from app_info import PROJECT_URL, APP_VERSION
         app = QApplication.instance() or QApplication([])
         configure_application(app)
         page = about_page(lambda path: None)
         page.resize(960, 1100); page.show(); app.processEvents()
         link = page.findChild(QLabel, 'aboutRepository')
         self.assertIn(PROJECT_URL, link.text())
-        self.assertIn('1.1.0', page.findChild(QLabel, 'aboutRelease').text())
+        self.assertIn(APP_VERSION, page.findChild(QLabel, 'aboutRelease').text())
         with patch('qt_about.QDesktopServices.openUrl') as opened:
             link.linkActivated.emit(PROJECT_URL)
             self.assertEqual(opened.call_args.args[0].toString(), PROJECT_URL)

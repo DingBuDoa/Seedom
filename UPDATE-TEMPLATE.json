@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "application": "Seedom",
+  "platform": "windows-x64",
+  "version": "1.1.2",
+  "base_versions": ["1.1.1", "1.1.2"],
+  "build_date": "2026-11-07",
+  "notes": "在这里填写用户可见的更新内容。此文件是模板，正式发布请使用打包工具生成 update.json。",
+  "package": {
+    "name": "SeedomVFX-1.1.2-Hotfix-20261107.zip",
+    "url": "https://github.com/DingBuDoa/Seedom/releases/download/v1.1.2/SeedomVFX-1.1.2-Hotfix-20261107.zip",
+    "bytes": 1,
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}
