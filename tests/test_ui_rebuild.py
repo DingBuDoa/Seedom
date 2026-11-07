@@ -595,6 +595,11 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(rail.geometry().top(), window.table_area.rect().top())
             self.assertEqual(rail.geometry().bottom(), window.table_area.rect().bottom())
             self.assertEqual(rail.geometry().right(), window.table_area.rect().right())
+            self.assertEqual(window.sticky_actions.geometry().top(), window.table_area.rect().top())
+            self.assertEqual(window.sticky_actions.geometry().height(), window.table_area.height())
+            header_bottom = window.table.horizontalHeader().mapTo(
+                window.table_area, QPoint(0, window.table.horizontalHeader().height())).y()
+            self.assertGreaterEqual(window.sticky_actions.row_rect(0).top(), header_bottom)
 
     def test_selected_row_highlight_fills_gap_before_pinned_actions(self):
         window = self.window
