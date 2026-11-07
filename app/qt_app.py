@@ -128,6 +128,9 @@ class TaskTableView(QTableView):
         overlay = getattr(self, 'sticky_actions', None)
         if overlay:
             overlay.update()
+        sync = getattr(self, 'schedule_scrollbar_sync', None)
+        if sync:
+            sync()
 
 
 class StickyActions(QWidget):
@@ -447,12 +450,14 @@ class MainWindow(QMainWindow):
         self.table_vscroll = QScrollBar(Qt.Orientation.Vertical, self.table_area)
         self.table_vscroll.setObjectName('taskTableScrollBar')
         self.table_vscroll.setFixedWidth(10)
+        self._table_sync_pending = False
+        self.table.schedule_scrollbar_sync = self.schedule_table_scrollbar_sync
         internal_vscroll = self.table.verticalScrollBar()
-        internal_vscroll.rangeChanged.connect(self.sync_table_scrollbar)
+        internal_vscroll.rangeChanged.connect(self.schedule_table_scrollbar_sync)
         internal_vscroll.valueChanged.connect(self.table_vscroll.setValue)
         self.table_vscroll.valueChanged.connect(internal_vscroll.setValue)
-        self.model.modelReset.connect(lambda: QTimer.singleShot(0, self.sync_table_scrollbar))
-        self.sync_table_scrollbar()
+        self.model.modelReset.connect(self.schedule_table_scrollbar_sync)
+        self.schedule_table_scrollbar_sync()
         table_layout.addWidget(self.table, 1); table_layout.addWidget(self.sticky_actions); table_layout.addWidget(self.table_vscroll)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -515,10 +520,17 @@ class MainWindow(QMainWindow):
             self.empty.setGeometry(self.table.viewport().rect())
             if hasattr(self, 'sticky_actions'): self.sticky_actions.update()
             if event.type() == QEvent.Type.Resize:
-                QTimer.singleShot(0, self.sync_table_scrollbar)
+                self.schedule_table_scrollbar_sync()
         return super().eventFilter(watched, event)
 
+    def schedule_table_scrollbar_sync(self, *_):
+        if self._table_sync_pending:
+            return
+        self._table_sync_pending = True
+        QTimer.singleShot(0, self.sync_table_scrollbar)
+
     def sync_table_scrollbar(self, *_):
+        self._table_sync_pending = False
         if not hasattr(self, 'table_vscroll'):
             return
         source = self.table.verticalScrollBar()
@@ -531,6 +543,7 @@ class MainWindow(QMainWindow):
     def resizeEvent(self, event):
         super().resizeEvent(event)
         if hasattr(self, 'sticky_actions'): self.sticky_actions.update()
+        if hasattr(self, 'table_vscroll'): self.schedule_table_scrollbar_sync()
 
     def build_settings(self):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); body = QWidget(); body.setObjectName('workspace'); scroll.setWidget(body)

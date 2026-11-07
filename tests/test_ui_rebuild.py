@@ -568,6 +568,34 @@ class DesktopTests(unittest.TestCase):
         self.assertLessEqual(status_left + window.table.columnWidth(5), window.table.viewport().width())
         window.grab().save(str(self.artifacts / 'workspace-min-horizontal-scroll.png'))
 
+    def test_vertical_scrollbar_stays_aligned_after_maximize_restore_resizes(self):
+        window = self.window
+        window.resize(1180, 760); window.show(); self.app.processEvents()
+        for number in range(24):
+            window.tasks.add(self.video, Options(), f'窗口缩放滚动条测试 {number + 1}')
+        window.rebuild_rows()
+
+        sizes = iter(((1180, 760), (860, 620), (1280, 780), (980, 700)))
+        for state in ('maximized', 'restored', 'maximized', 'restored'):
+            if state == 'maximized':
+                window.showMaximized()
+            else:
+                window.showNormal()
+                window.resize(*next(sizes))
+            self.app.processEvents()
+            QTest.qWait(30)
+            self.app.processEvents()
+            table_bar = window.table.verticalScrollBar()
+            rail = window.table_vscroll
+            self.assertGreater(table_bar.maximum(), 0)
+            self.assertTrue(rail.isVisible())
+            self.assertEqual(rail.minimum(), table_bar.minimum())
+            self.assertEqual(rail.maximum(), table_bar.maximum())
+            self.assertEqual(rail.pageStep(), table_bar.pageStep())
+            self.assertEqual(rail.geometry().top(), window.table_area.rect().top())
+            self.assertEqual(rail.geometry().bottom(), window.table_area.rect().bottom())
+            self.assertEqual(rail.geometry().right(), window.table_area.rect().right())
+
     def test_selected_row_highlight_fills_gap_before_pinned_actions(self):
         window = self.window
         window.resize(1500, 800); self.app.processEvents()
