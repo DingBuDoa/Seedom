@@ -909,7 +909,7 @@ class MainWindow(QMainWindow):
         for index in range(self.proxy.rowCount()):
             if self.proxy.index(index, 0).data(Qt.ItemDataRole.UserRole)['id'] in selected:
                 self.table.selectionModel().select(self.proxy.index(index, 0), self.table.selectionModel().SelectionFlag.Select | self.table.selectionModel().SelectionFlag.Rows)
-        self.summary_label.setText(f'{len(rows)} 项任务与历史结果 · 每次重建独立保留')
+        self.summary_label.setText(f'{len(rows)} 项任务与历史结果')
         self.update_empty(); self.update_details(); self.update_busy()
 
     def apply_filter(self, *_):

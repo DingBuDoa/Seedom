@@ -179,7 +179,7 @@ class TaskDialog(QDialog):
         self.blend = QCheckBox('计算完成后生成 Blender 文件')
         self.blend.setChecked(bool(job and job.get('blender')))
         form.addRow(self.blend)
-        self.blender_group = QGroupBox('Blender 导出设置（首次启动会自动缓存版本）')
+        self.blender_group = QGroupBox('Blender 导出设置')
         blender_form = QFormLayout(self.blender_group)
         blender_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         self.blender_note = label(f'检测到 {len(self.blender_records)} 个 Blender 版本。' if self.blender_records else '正在检测本机 Blender；完成后会显示版本列表。')
