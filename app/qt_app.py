@@ -520,7 +520,8 @@ class MainWindow(QMainWindow):
         self.start_button.setToolTip('按执行顺序依次处理全部待执行任务')
         self.pause_button = button('暂停队列', self.toggle_pause); self.pause_button.setIcon(icon('pause')); tools.addWidget(self.pause_button)
         self.stop_button = button('停止', self.stop); self.stop_button.setIcon(icon('stop')); tools.addWidget(self.stop_button)
-        self.auto_poweroff = QCheckBox('完成任务后：关机（休眠）')
+        saved_power_action = self.config.get('queue_power_action', 'shutdown')
+        self.auto_poweroff = QCheckBox(f'完成任务后：{power_action_label(saved_power_action)}')
         self.auto_poweroff.setChecked(self.config.get('auto_poweroff_after_queue') is True)
         self.auto_poweroff.setToolTip('队列自然完成后执行设置中的关机或休眠动作；手动停止不会触发。')
         self.auto_poweroff.stateChanged.connect(self.queue_behavior_changed)
@@ -720,8 +721,10 @@ class MainWindow(QMainWindow):
         saved_action = self.config.get('queue_power_action', 'shutdown')
         saved_index = self.power_action.findData(saved_action)
         self.power_action.setCurrentIndex(saved_index if saved_index >= 0 else 0)
+        self.power_action.currentIndexChanged.connect(self.update_queue_poweroff_label)
+        self.update_queue_poweroff_label()
         form.addRow('完成队列后', self.power_action)
-        form.addRow(label('主界面勾选“完成任务后：关机（休眠）”后，队列自然完成时执行此动作；停止或异常中断不会执行。'))
+        form.addRow(label('主界面勾选“完成任务后：关机”或“完成任务后：休眠”后，队列自然完成时执行此动作；停止或异常中断不会执行。'))
         self.environment_info = label('使用随软件提供的独立运行环境。'); form.addRow(self.environment_info)
         form.addRow(button('重新检测运行环境', self.check_environment)); layout.addWidget(group)
         self.update_panel = UpdatePanel(ROOT, automatic=self.config.get('check_updates_on_startup', True) is not False,
@@ -1673,6 +1676,10 @@ class MainWindow(QMainWindow):
             self.save_preferences()
         except OSError as error:
             self.state_label.setText(f'自动关机设置保存失败：{error}')
+
+    def update_queue_poweroff_label(self, _index=0):
+        action = self.power_action.currentData() if hasattr(self, 'power_action') else self.config.get('queue_power_action', 'shutdown')
+        self.auto_poweroff.setText(f'完成任务后：{power_action_label(action)}')
 
     def perform_queue_power_action(self, action):
         if self.busy or not self.auto_poweroff.isChecked():
