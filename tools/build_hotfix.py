@@ -36,7 +36,7 @@ def payload_sources(root, version):
         yield root / name
 
 
-def write_publish_documents(output, version, root=ROOT):
+def write_publish_documents(output, version, base_versions, root=ROOT):
     for name in ('UPDATE-STANDARD.md', 'UPDATE-TEMPLATE.json'):
         shutil.copyfile(root / name, output / name)
     shutil.copyfile(root / 'docs/updates/update.schema.json', output / 'update.schema.json')
@@ -47,7 +47,7 @@ def write_publish_documents(output, version, root=ROOT):
 3. 上传本目录的热补丁 ZIP，再上传 `update.json`。可同时上传 `.zip.sha256` 和 `VALIDATION.json`。
 4. 确认附件齐全后发布正式 Release；不要标记为预发布。
 
-1.1.0 用户需先手动安装 1.1.1 补丁，以后可在软件中检查并安装热补丁。
+支持版本 `{'、'.join(base_versions)}` 的用户直接安装本次累积补丁；后续版本可在软件中检查并安装热补丁。
 `update.json` 是 Release 附件，不需要把它放入源码仓库根目录。
 这些文件只在本地生成，打包工具不会上传、发布或修改 GitHub。
 后续版本的流程见本目录 `UPDATE-STANDARD.md`。
@@ -95,7 +95,7 @@ def build(output, base_versions, root=ROOT):
 构建日期：{BUILD_DATE}。支持升级的版本：{'、'.join(bases)}。
 项目主页：{PROJECT_URL}
 
-## 手动安装（首次从 1.1.0 升级时使用）
+## 手动安装
 
 1. 关闭软件及其求解器、Blender 导出进程。
 2. 解压 ZIP，将整个 `{name}` 文件夹放入原软件目录，与 `Start.bat`、`app`、`runtime` 同级。
@@ -134,7 +134,7 @@ def build(output, base_versions, root=ROOT):
                                  url=f'{PROJECT_URL}/releases/download/v{version}/{archive.name}',
                                  bytes=archive.stat().st_size, sha256=checksum))
     validate_update(document); write_json(output / 'update.json', document)
-    write_publish_documents(output, version, root)
+    write_publish_documents(output, version, bases, root)
     print(json.dumps(dict(version=version, folder=str(folder), zip=str(archive),
                           update_json=str(output / 'update.json'), payload_files=len(entries),
                           zip_bytes=archive.stat().st_size), ensure_ascii=False))

@@ -1,7 +1,7 @@
 """Release metadata and the upstream projects included in this distribution."""
 APP_NAME = '拾点VFX（SeedomVFX）'
-APP_VERSION = '1.1.1'
-BUILD_DATE = '2026-11-07'
+APP_VERSION = '1.2.0'
+BUILD_DATE = '2026-11-08'
 PROJECT_URL = 'https://github.com/DingBuDoa/Seedom'
 SOLVER_CHOICES = {'fastmap': 'FastMap-更高速度', 'glomap': 'GLOMap-更高精度'}
 
