@@ -6,7 +6,8 @@ import sys
 import PySide6
 from PySide6.QtCore import Qt, QUrl, qVersion
 from PySide6.QtGui import QDesktopServices, QIcon
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea, QSizePolicy
+from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea,
+    QSizePolicy, QDialog, QTextBrowser, QDialogButtonBox, QMessageBox)
 
 from app_info import APP_NAME, APP_VERSION, BUILD_DATE, PROJECT_URL, OPEN_SOURCE_PROJECTS
 from paths import ROOT
@@ -27,6 +28,29 @@ def source_link(text, url, object_name='aboutLink'):
     link.setMinimumWidth(0)
     link.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
     return link
+
+
+def show_markdown_dialog(path, parent=None):
+    """Read a local Markdown document in a native, selectable Qt viewer."""
+    path = ROOT / path if not path.is_absolute() else path
+    try:
+        content = path.read_text(encoding='utf-8-sig')
+    except (OSError, UnicodeError) as error:
+        QMessageBox.warning(parent, '无法读取使用说明', f'无法读取 {path.name}：{error}')
+        return
+    dialog = QDialog(parent)
+    dialog.setWindowTitle('使用说明')
+    dialog.resize(820, 620)
+    layout = QVBoxLayout(dialog)
+    viewer = QTextBrowser(dialog)
+    viewer.setOpenExternalLinks(True)
+    viewer.setOpenLinks(True)
+    viewer.setMarkdown(content)
+    layout.addWidget(viewer)
+    buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
+    buttons.rejected.connect(dialog.reject)
+    layout.addWidget(buttons)
+    dialog.exec()
 
 
 def about_page(open_path, check_updates=None):
@@ -93,7 +117,7 @@ def about_page(open_path, check_updates=None):
     actions = QHBoxLayout(); actions.setSpacing(10); actions.addStretch()
     if check_updates:
         actions.addWidget(button('检查更新', check_updates, True))
-    actions.addWidget(button('查看使用说明', lambda: open_path(ROOT / 'README.md')))
+    actions.addWidget(button('查看使用说明', lambda: show_markdown_dialog(ROOT / 'README.md', page)))
     actions.addWidget(button('打开软件目录', lambda: open_path(ROOT)))
     actions.addStretch(); content.addLayout(actions)
     outer.addWidget(card, 0, Qt.AlignmentFlag.AlignHCenter); outer.addStretch()
