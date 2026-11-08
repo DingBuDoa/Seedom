@@ -438,7 +438,7 @@ class DesktopTests(unittest.TestCase):
         window.nav_group.button(1).click(); self.app.processEvents()
         self.assertEqual(set(window.default_controls), {'output_root', 'python', 'gpu_index'})
         settings_groups = [group.title() for group in window.pages.widget(1).findChildren(QGroupBox)]
-        self.assertEqual(settings_groups, ['路径与环境', '软件更新', 'Blender 版本'])
+        self.assertEqual(settings_groups, ['路径与环境', '软件更新', '界面主题', 'Blender 版本'])
         self.assertFalse(any('保留策略' in child.text() or '清理过期' in child.text()
                              for child in window.pages.widget(1).findChildren(QLabel)))
         self.assertTrue(window.blender_add_button.text().startswith('添加 Blender 安装目录'))

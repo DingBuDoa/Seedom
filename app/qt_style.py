@@ -12,7 +12,7 @@ def inset_numeric_fields(parent):
         control.lineEdit().setTextMargins(10, 0, 0, 0)
 
 
-STYLE = '''
+LIGHT_STYLE = '''
 QWidget { color: #1c1f26; font-family: "Microsoft YaHei UI"; font-size: 13px; }
 QMainWindow, QWidget#workspace { background: #f4f5f7; }
 QWidget#sidebar { background: #fbfbfc; border-right: 1px solid #e3e5e9; }
@@ -115,12 +115,74 @@ QLabel#aboutRepository { font-size: 12px; }
 QLabel#aboutFootnote { color: #98a0ac; font-size: 11px; }
 '''
 
-STYLE += 'QComboBox::down-arrow { image: url("' + (Path(__file__).parent / 'icons/chevron.svg').as_posix() + '"); width: 10px; height: 6px; }'
-for control in ('QSpinBox', 'QDoubleSpinBox'):
-    STYLE += f'{control} {{ padding-right: 24px; }}'
-    for direction, position, name in (('up', 'top', 'chevron-up.svg'), ('down', 'bottom', 'chevron.svg')):
-        STYLE += f'{control}::{direction}-button {{ subcontrol-origin: border; subcontrol-position: {position} right; width: 22px; border: none; }}'
-        STYLE += f'{control}::{direction}-arrow {{ image: url("' + (Path(__file__).parent / 'icons' / name).as_posix() + '"); width: 8px; height: 5px; }'
+_DARK_COLORS = {
+    '#1c1f26': '#edf1f7', '#f4f5f7': '#171a21', '#fbfbfc': '#1f242d',
+    '#e3e5e9': '#353d49', '#ffffff': '#252b35', '#fafbfc': '#202630',
+    '#89929f': '#a6afbd', '#28313d': '#dce3ec', '#eaf0ff': '#263b66',
+    '#315fc5': '#9bbcff', '#e8f5ee': '#1d4739', '#19734f': '#7ce0b1',
+    '#fff4df': '#4a3920', '#94600b': '#f0c36d', '#fdeceb': '#4b292d',
+    '#b43c35': '#ff9b91', '#697382': '#aeb8c7', '#8b939f': '#9aa6b6',
+    '#fff8e6': '#443a20', '#f0dca8': '#6d5d31', '#836314': '#f2d27a',
+    '#d3d6dc': '#46505e', '#f5f6f8': '#2b323d', '#bdc3ce': '#5c6878',
+    '#eef0f4': '#303845', '#b4bac4': '#788394', '#e5e8ed': '#3c4552',
+    '#2f6bff': '#78a7ff', '#2559db': '#5c8df0', '#15845d': '#28a879',
+    '#116c4b': '#19865c', '#a8c9bc': '#487966', '#f5f7ff': '#f3f6fc',
+    '#aebfe9': '#526b9e', '#d8443c': '#ff8178', '#626a76': '#a5afbf',
+    '#737c89': '#a0aaba', '#ebedf1': '#2a313c', '#dce6ff': '#304b78',
+    '#4d5868': '#b5bfce', '#f0f1f4': '#303743', '#eef0f3': '#303743',
+    '#f0f5ff': '#202f4a', '#dce7ff': '#3c5275', '#7a8391': '#aeb8c6',
+    '#303744': '#d7dee9', '#98a0ac': '#9ca8b8', '#a5adb9': '#7b8798',
+    '#ced3dc': '#566272', '#e6e9ef': '#343d4a', '#eff0f3': '#2a313c',
+    '#c7ccd5': '#657183', '#16865f': '#38c58d', '#eaf7f1': '#1d4739',
+    '#fdecea': '#4b292d', '#a77516': '#d3a34e', '#fff6e3': '#4a3920',
+    '#f0f2f5': '#303743', '#a8c9bc': '#487966',
+}
+
+
+def _style_suffix():
+    style = 'QComboBox::down-arrow { image: url("' + (Path(__file__).parent / 'icons/chevron.svg').as_posix() + '"); width: 10px; height: 6px; }'
+    for control in ('QSpinBox', 'QDoubleSpinBox'):
+        style += f'{control} {{ padding-right: 24px; }}'
+        for direction, position, name in (('up', 'top', 'chevron-up.svg'), ('down', 'bottom', 'chevron.svg')):
+            style += f'{control}::{direction}-button {{ subcontrol-origin: border; subcontrol-position: {position} right; width: 22px; border: none; }}'
+            style += f'{control}::{direction}-arrow {{ image: url("' + (Path(__file__).parent / 'icons' / name).as_posix() + '"); width: 8px; height: 5px; }'
+    return style
+
+
+STYLE = LIGHT_STYLE + _style_suffix()
+_ACTIVE_THEME = 'light'
+
+
+def set_active_theme(theme):
+    global _ACTIVE_THEME
+    _ACTIVE_THEME = 'dark' if theme == 'dark' else 'light'
+
+
+def theme_color(value):
+    return _DARK_COLORS.get(value.lower(), value) if _ACTIVE_THEME == 'dark' else value
+
+
+def style_for_theme(theme):
+    set_active_theme(theme)
+    if theme != 'dark':
+        return LIGHT_STYLE + _style_suffix()
+    style = LIGHT_STYLE
+    for source, target in _DARK_COLORS.items():
+        style = style.replace(source, target)
+    style = style.replace('white', '#252b35')
+    return style + _style_suffix()
+
+
+def detect_system_theme(app):
+    try:
+        scheme = app.styleHints().colorScheme()
+        if scheme == Qt.ColorScheme.Dark:
+            return 'dark'
+        if scheme == Qt.ColorScheme.Light:
+            return 'light'
+    except (AttributeError, TypeError):
+        pass
+    return 'dark' if app.palette().window().color().lightness() < 128 else 'light'
 
 PATHS = {
     'up': '<path d="m6 10 6-6 6 6M12 4v16"/>',

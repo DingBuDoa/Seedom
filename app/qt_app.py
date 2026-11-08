@@ -34,7 +34,8 @@ from log_management import rotate_log
 from task_queue import TaskQueue, MOVABLE_STATES
 from qt_dialogs import TaskDialog, BlenderDialog, button, label
 from blender_runtime import discover_blenders, probe_blender
-from qt_style import STYLE, icon, inset_numeric_fields
+from qt_style import (STYLE, icon, inset_numeric_fields, style_for_theme,
+                      detect_system_theme, theme_color)
 from qt_updates import UpdatePanel
 from app_info import APP_NAME, APP_VERSION, SOLVER_CHOICES
 from json_store import atomic_write_json
@@ -175,7 +176,7 @@ class TaskModel(QAbstractTableModel):
             return row['date'] if col == 4 else row['state'] if col == 5 else row['cells'][col].casefold()
         if role == Qt.ItemDataRole.DisplayRole: return row['cells'][col]
         if role == Qt.ItemDataRole.ForegroundRole:
-            return QColor('#1c1f26' if col == 0 else '#697382')
+            return QColor(theme_color('#1c1f26' if col == 0 else '#697382'))
 
     def replace(self, rows):
         self.beginResetModel(); self.rows = rows; self.endResetModel()
@@ -250,13 +251,13 @@ class StickyActions(QWidget):
 
     def paintEvent(self, _event):
         painter = QPainter(self)
-        painter.fillRect(self.rect(), QColor('#ffffff'))
+        painter.fillRect(self.rect(), QColor(theme_color('#ffffff')))
         header_bottom = self.header_bottom()
-        painter.fillRect(0, 0, self.width(), header_bottom, QColor('#fafbfc'))
+        painter.fillRect(0, 0, self.width(), header_bottom, QColor(theme_color('#fafbfc')))
         action_left = 0
-        painter.setPen(QColor('#e3e5e9'))
+        painter.setPen(QColor(theme_color('#e3e5e9')))
         painter.drawLine(0, header_bottom - 1, self.width(), header_bottom - 1)
-        painter.setPen(QColor('#89929f'))
+        painter.setPen(QColor(theme_color('#89929f')))
         painter.drawText(QRect(action_left + 12, 0, self.WIDTH - 20, header_bottom),
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, '操作')
         model = self.table.model()
@@ -279,8 +280,8 @@ class StickyActions(QWidget):
             row = index.data(Qt.ItemDataRole.UserRole)
             if row is None: continue
             if self.table.selectionModel().isRowSelected(row_number, QModelIndex()):
-                painter.fillRect(0, y, self.width(), height, QColor('#eaf0ff'))
-            painter.setPen(QColor('#eef0f4'))
+                painter.fillRect(0, y, self.width(), height, QColor(theme_color('#eaf0ff')))
+            painter.setPen(QColor(theme_color('#eef0f4')))
             painter.drawLine(0, y + height - 1, self.width(), y + height - 1)
             for (name, _, enabled), x in zip(row_actions(row),
                                               range(action_left + 6, action_left + 6 + 5 * 26, 26)):
@@ -327,7 +328,10 @@ class TaskDelegate(QStyledItemDelegate):
     def __init__(self, parent, callback):
         super().__init__(parent)
         self.callback = callback
-        self.icons = {(name, enabled): icon(name, '#697382' if enabled else '#c7ccd5')
+        self.refresh_theme()
+
+    def refresh_theme(self):
+        self.icons = {(name, enabled): icon(name, theme_color('#697382' if enabled else '#c7ccd5'))
                       for name in ('edit', 'play', 'folder', 'log', 'trash') for enabled in (True, False)}
 
     def action_rects(self, option):
@@ -349,11 +353,11 @@ class TaskDelegate(QStyledItemDelegate):
                 self.icons[name, enabled].paint(painter, target.adjusted(5, 5, -5, -5))
         elif index.column() == 0:
             font = QFont(option.font); font.setWeight(QFont.Weight.Medium)
-            painter.setFont(font); painter.setPen(QColor('#1c1f26'))
+            painter.setFont(font); painter.setPen(QColor(theme_color('#1c1f26')))
             painter.drawText(rect.adjusted(0, 7, 0, -25), Qt.AlignmentFlag.AlignVCenter,
                              painter.fontMetrics().elidedText(row['name'], Qt.TextElideMode.ElideRight, rect.width()))
             font.setPixelSize(11); font.setWeight(QFont.Weight.Normal)
-            painter.setFont(font); painter.setPen(QColor('#98a0ac'))
+            painter.setFont(font); painter.setPen(QColor(theme_color('#98a0ac')))
             painter.drawText(rect.adjusted(0, 27, 0, -5), Qt.AlignmentFlag.AlignVCenter,
                              painter.fontMetrics().elidedText(row['path'], Qt.TextElideMode.ElideMiddle, rect.width()))
         else:
@@ -361,6 +365,7 @@ class TaskDelegate(QStyledItemDelegate):
             color, fill = {'完成': ('#16865f', '#eaf7f1'), '运行中': ('#2f6bff', '#eaf0ff'),
                 '失败': ('#d8443c', '#fdecea'), '已停止': ('#a77516', '#fff6e3'),
                 '文件不完整': ('#d8443c', '#fdecea')}.get(state, ('#737c89', '#f0f2f5'))
+            color, fill = theme_color(color), theme_color(fill)
             text = row.get('stage', '') if state == '运行中' else ('Blender 已生成' if state == '完成' and row.get('exports') else state)
             if state in MOVABLE_STATES and row.get('queue_position'):
                 text += f" · {row['queue_position']}"
@@ -445,6 +450,13 @@ class MainWindow(QMainWindow):
         self.recent_log_signature = None
         self.last_scene = None
         self.background = background
+        self._theme_mode = self.config.get('theme_mode', 'auto')
+        if self._theme_mode not in ('auto', 'light', 'dark'):
+            self._theme_mode = 'auto'
+        self.apply_theme()
+        color_scheme_changed = getattr(QApplication.instance().styleHints(), 'colorSchemeChanged', None)
+        if color_scheme_changed is not None:
+            color_scheme_changed.connect(self.system_theme_changed)
         self.restore_tasks()
         self.build()
         self.rebuild_rows()
@@ -734,6 +746,17 @@ class MainWindow(QMainWindow):
         self.update_panel.update_available.connect(self.notify_update)
         self.update_panel.install_requested.connect(self.install_update)
         layout.addWidget(self.update_panel)
+        group, form = settings_form('界面主题')
+        self.theme_choice = QComboBox()
+        self.theme_choice.addItem('自动（跟随系统）', 'auto')
+        self.theme_choice.addItem('浅色', 'light')
+        self.theme_choice.addItem('深色', 'dark')
+        index = self.theme_choice.findData(self._theme_mode)
+        self.theme_choice.setCurrentIndex(index if index >= 0 else 0)
+        self.theme_choice.currentIndexChanged.connect(self.theme_choice_changed)
+        form.addRow('主题', self.theme_choice)
+        form.addRow(label('自动模式会随系统明暗主题变化。'))
+        layout.addWidget(group)
         group, form = settings_form('Blender 版本')
         self.blender_cache_label = label(f'检测到 {len(self.blender_records)} 个 Blender 版本。' if self.blender_records else '启动时自动检测 Blender 版本。'); form.addRow('Blender 版本', self.blender_cache_label)
         row = QHBoxLayout(); row.setSpacing(8)
@@ -749,6 +772,7 @@ class MainWindow(QMainWindow):
         self.reuse_failed_projects.stateChanged.connect(self.mark_settings_dirty)
         self.power_action.currentIndexChanged.connect(self.mark_settings_dirty)
         self.update_panel.automatic.stateChanged.connect(self.mark_settings_dirty)
+        self.theme_choice.currentIndexChanged.connect(self.mark_settings_dirty)
         for group in body.findChildren(QGroupBox):
             form = group.layout()
             if not isinstance(form, QFormLayout):
@@ -760,6 +784,29 @@ class MainWindow(QMainWindow):
     def build_about(self):
         from qt_about import about_page
         self.pages.addWidget(about_page(self.open_path, lambda: self.show_updates(check=True)))
+
+    def selected_theme(self):
+        mode = self.theme_choice.currentData() if hasattr(self, 'theme_choice') else self._theme_mode
+        return detect_system_theme(QApplication.instance()) if mode == 'auto' else mode
+
+    def apply_theme(self):
+        app = QApplication.instance()
+        app.setStyleSheet(style_for_theme(self.selected_theme()))
+        if hasattr(self, 'table'):
+            delegate = self.table.itemDelegate()
+            if hasattr(delegate, 'refresh_theme'):
+                delegate.refresh_theme()
+            self.table.viewport().update()
+            self.sticky_actions.update()
+
+    def system_theme_changed(self, *_):
+        if (self.theme_choice.currentData() if hasattr(self, 'theme_choice') else self._theme_mode) == 'auto':
+            self.apply_theme()
+
+    def theme_choice_changed(self, _index=0):
+        self._theme_mode = self.theme_choice.currentData()
+        self.apply_theme()
+        self.mark_settings_dirty()
 
     def navigate_page(self, index):
         current = self.pages.currentIndex()
@@ -810,6 +857,9 @@ class MainWindow(QMainWindow):
             index = self.power_action.findData(saved_action)
             self.power_action.setCurrentIndex(index if index >= 0 else 0)
             self.update_panel.automatic.setChecked(self.config.get('check_updates_on_startup', True) is not False)
+            saved_theme = self.config.get('theme_mode', 'auto')
+            index = self.theme_choice.findData(saved_theme)
+            self.theme_choice.setCurrentIndex(index if index >= 0 else 0)
         finally:
             for control in controls:
                 control.blockSignals(False)
@@ -817,6 +867,8 @@ class MainWindow(QMainWindow):
             self.power_action.blockSignals(False)
             self.update_panel.automatic.blockSignals(False)
         self.update_queue_poweroff_label()
+        self._theme_mode = self.theme_choice.currentData()
+        self.apply_theme()
         self.settings_dirty = False
 
     def notify_update(self, version):
@@ -1732,6 +1784,7 @@ class MainWindow(QMainWindow):
             data['auto_poweroff_after_queue'] = self.auto_poweroff.isChecked()
         if hasattr(self, 'power_action'):
             data['queue_power_action'] = self.power_action.currentData() or 'shutdown'
+        data['theme_mode'] = self.config.get('theme_mode', self._theme_mode)
         atomic_write_json(self.settings_path, data)
         self.config = data
 
@@ -1763,7 +1816,8 @@ class MainWindow(QMainWindow):
             self.config.update(reuse_failed_projects=self.reuse_failed_projects.isChecked(),
                                check_updates_on_startup=self.update_panel.automatic.isChecked(),
                                auto_poweroff_after_queue=self.auto_poweroff.isChecked(),
-                               queue_power_action=self.power_action.currentData() or 'shutdown')
+                               queue_power_action=self.power_action.currentData() or 'shutdown',
+                               theme_mode=self.theme_choice.currentData() or 'auto')
             self.save_preferences()
             self.tasks.reuse_failed_projects = self.reuse_failed_projects.isChecked()
             self.settings_dirty = False
