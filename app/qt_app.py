@@ -40,6 +40,7 @@ from app_info import APP_NAME, APP_VERSION, SOLVER_CHOICES
 from json_store import atomic_write_json
 from task_storage import restore_jobs
 from task_progress import live_remaining
+from system_actions import execute_power_action, power_action_label
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
 SOLVERS = {'fastmap': 'FastMap', 'glomap-gpu': 'GLOMap · GPU', 'glomap-cpu': 'GLOMap · CPU', 'glomap': 'GLOMap'}
@@ -519,6 +520,11 @@ class MainWindow(QMainWindow):
         self.start_button.setToolTip('按执行顺序依次处理全部待执行任务')
         self.pause_button = button('暂停队列', self.toggle_pause); self.pause_button.setIcon(icon('pause')); tools.addWidget(self.pause_button)
         self.stop_button = button('停止', self.stop); self.stop_button.setIcon(icon('stop')); tools.addWidget(self.stop_button)
+        self.auto_poweroff = QCheckBox('完成任务后：关机（休眠）')
+        self.auto_poweroff.setChecked(self.config.get('auto_poweroff_after_queue') is True)
+        self.auto_poweroff.setToolTip('队列自然完成后执行设置中的关机或休眠动作；手动停止不会触发。')
+        self.auto_poweroff.stateChanged.connect(self.queue_behavior_changed)
+        tools.addWidget(self.auto_poweroff)
         tools.addStretch(); tools.addWidget(label('Ctrl + N  添加任务')); hl.addLayout(tools)
         filters = QHBoxLayout(); filters.setSpacing(12)
         self.search = QLineEdit(); self.search.setPlaceholderText('搜索任务名称、素材或求解方案'); self.search.setClearButtonEnabled(True); self.search.setMaximumWidth(300)
@@ -708,6 +714,14 @@ class MainWindow(QMainWindow):
         retry_note = label('启用后，重试同名、同素材的未完成任务时复用项目目录；已完成项目始终另建目录。')
         retry_note.setWordWrap(True)
         form.addRow(retry_note)
+        self.power_action = QComboBox()
+        self.power_action.addItem('关机', 'shutdown')
+        self.power_action.addItem('休眠', 'sleep')
+        saved_action = self.config.get('queue_power_action', 'shutdown')
+        saved_index = self.power_action.findData(saved_action)
+        self.power_action.setCurrentIndex(saved_index if saved_index >= 0 else 0)
+        form.addRow('完成队列后', self.power_action)
+        form.addRow(label('主界面勾选“完成任务后：关机（休眠）”后，队列自然完成时执行此动作；停止或异常中断不会执行。'))
         self.environment_info = label('使用随软件提供的独立运行环境。'); form.addRow(self.environment_info)
         form.addRow(button('重新检测运行环境', self.check_environment)); layout.addWidget(group)
         self.update_panel = UpdatePanel(ROOT, automatic=self.config.get('check_updates_on_startup', True) is not False,
@@ -1594,6 +1608,10 @@ class MainWindow(QMainWindow):
                     self.exporting = False; self.export_pipeline = None
                     self.progress.setValue(5 if event.get('success') else 0)
                 self.state_label.setText(event['text']); self.persist_tasks(); self.refresh_projects(); self.schedule_estimate(); dirty = True
+                if kind == 'finished' and event.get('completed') and self.auto_poweroff.isChecked():
+                    action = self.power_action.currentData() or self.config.get('queue_power_action', 'shutdown')
+                    self.state_label.setText(f"{event['text']} · 即将{power_action_label(action)}")
+                    QTimer.singleShot(800, lambda a=action: self.perform_queue_power_action(a))
             elif kind == 'projects':
                 self.project_loading = False; self.refresh_button.setEnabled(True)
                 self.records = {r['id']: r for r in event['records']}
@@ -1646,14 +1664,38 @@ class MainWindow(QMainWindow):
         for key in ('python', 'output_root'): data[key] = portable_path(data[key])
         data['backend_label'] = SOLVER_CHOICES[self.defaults.backend]
         data['camera_label'] = '近似针孔（无畸变）' if self.defaults.camera_mode == 'pinhole' else '自动估计畸变（默认）'
+        if hasattr(self, 'auto_poweroff'):
+            data['auto_poweroff_after_queue'] = self.auto_poweroff.isChecked()
+        if hasattr(self, 'power_action'):
+            data['queue_power_action'] = self.power_action.currentData() or 'shutdown'
         atomic_write_json(self.settings_path, data)
         self.config = data
+
+    def queue_behavior_changed(self, _state=0):
+        """Persist the main-window opt-in without requiring a settings visit."""
+        try:
+            self.save_preferences()
+        except OSError as error:
+            self.state_label.setText(f'自动关机设置保存失败：{error}')
+
+    def perform_queue_power_action(self, action):
+        if self.busy or not self.auto_poweroff.isChecked():
+            return
+        try:
+            self.save_preferences()
+            execute_power_action(action)
+        except OSError as error:
+            self.auto_poweroff.setChecked(False)
+            self.state_label.setText(f'未执行{power_action_label(action)}：{error}')
+            self.append_log(f'[队列完成动作] {error}\n')
 
     def save_settings_clicked(self):
         try:
             self.defaults = self.read_defaults()
             self.config.update(reuse_failed_projects=self.reuse_failed_projects.isChecked(),
-                               check_updates_on_startup=self.update_panel.automatic.isChecked())
+                               check_updates_on_startup=self.update_panel.automatic.isChecked(),
+                               auto_poweroff_after_queue=self.auto_poweroff.isChecked(),
+                               queue_power_action=self.power_action.currentData() or 'shutdown')
             self.save_preferences()
             self.tasks.reuse_failed_projects = self.reuse_failed_projects.isChecked()
             self.settings_note.setText('设置已保存。路径、处理显卡与运行环境偏好将用于后续新建的任务。'); self.refresh_projects()

@@ -180,6 +180,7 @@ class TaskQueue:
 
     def _run(self):
         failed = processed = 0
+        completed = False
         try:
             while True:
                 with self.condition:
@@ -191,6 +192,7 @@ class TaskQueue:
                     iid = next((key for key in self.jobs if key in self.pending_ids), None)
                     if iid is None:
                         self.accepting = False
+                        completed = True
                         break
                     self.pending_ids.remove(iid)
                     job = self.jobs[iid]
@@ -274,7 +276,7 @@ class TaskQueue:
                 self.running = False
                 self.accepting = False
                 self.pending_ids.clear()
-            self.emit({'type': 'finished', 'text': message})
+            self.emit({'type': 'finished', 'text': message, 'completed': completed})
 
     def pause(self, value):
         with self.condition:
