@@ -459,7 +459,7 @@ class DesktopTests(unittest.TestCase):
         original = window.default_controls['python'].text()
         window.default_controls['python'].setText(original + '-changed')
         self.assertTrue(window.settings_dirty)
-        with patch('qt_app.QMessageBox.question', return_value=QMessageBox.StandardButton.Discard):
+        with patch.object(window, 'prompt_unsaved_settings', return_value=QMessageBox.StandardButton.Discard):
             window.nav_group.button(0).click(); self.app.processEvents()
         self.assertEqual(window.pages.currentIndex(), 0)
         self.assertFalse(window.settings_dirty)

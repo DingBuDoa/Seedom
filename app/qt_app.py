@@ -764,10 +764,7 @@ class MainWindow(QMainWindow):
     def navigate_page(self, index):
         current = self.pages.currentIndex()
         if current == 1 and index != current and self.settings_dirty:
-            choice = QMessageBox.question(
-                self, '设置尚未保存', '设置页面有未保存的改动，要保存后再离开吗？',
-                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
-                QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+            choice = self.prompt_unsaved_settings('设置页面有未保存的改动，要保存后再离开吗？')
             if choice == QMessageBox.StandardButton.Cancel:
                 self.nav_group.button(current).setChecked(True)
                 return
@@ -781,6 +778,20 @@ class MainWindow(QMainWindow):
 
     def mark_settings_dirty(self, *_):
         self.settings_dirty = True
+
+    def prompt_unsaved_settings(self, message):
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Question)
+        dialog.setWindowTitle('设置尚未保存')
+        dialog.setText(message)
+        dialog.setStandardButtons(QMessageBox.StandardButton.Save |
+                                  QMessageBox.StandardButton.Discard |
+                                  QMessageBox.StandardButton.Cancel)
+        dialog.setDefaultButton(QMessageBox.StandardButton.Save)
+        dialog.button(QMessageBox.StandardButton.Save).setText('保存')
+        dialog.button(QMessageBox.StandardButton.Discard).setText('放弃')
+        dialog.button(QMessageBox.StandardButton.Cancel).setText('取消')
+        return dialog.exec()
 
     def restore_settings_controls(self):
         controls = list(self.default_controls.values())
@@ -1788,10 +1799,7 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(250, self.close)
             event.ignore(); return
         if self.settings_dirty:
-            choice = QMessageBox.question(
-                self, '设置尚未保存', '设置页面有未保存的改动，要保存后退出吗？',
-                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
-                QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+            choice = self.prompt_unsaved_settings('设置页面有未保存的改动，要保存后退出吗？')
             if choice == QMessageBox.StandardButton.Cancel:
                 event.ignore(); return
             if choice == QMessageBox.StandardButton.Save and not self.save_settings_clicked():
