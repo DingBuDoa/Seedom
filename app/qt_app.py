@@ -479,7 +479,8 @@ class MainWindow(QMainWindow):
         for i, (text, name) in enumerate((('任务', 'tasks'), ('设置', 'settings'), ('关于', 'about'))):
             nav = QPushButton('  ' + text); nav.setIcon(icon(name)); nav.setIconSize(QSize(17, 17)); nav.setObjectName('nav'); nav.setCheckable(True)
             self.nav_group.addButton(nav, i); sl.addWidget(nav)
-        self.nav_group.idClicked.connect(self.pages.setCurrentIndex)
+        self.settings_dirty = False
+        self.nav_group.idClicked.connect(self.navigate_page)
         self.nav_group.button(0).setChecked(True)
         sl.addStretch()
         self.sidebar_update = button('发现新版本', lambda: self.show_updates())
@@ -742,6 +743,12 @@ class MainWindow(QMainWindow):
         form.addRow(row); layout.addWidget(group)
         row = QHBoxLayout(); row.addStretch(); row.addWidget(button('保存设置', self.save_settings_clicked, True)); layout.addLayout(row)
         self.settings_note = label(''); layout.addWidget(self.settings_note); layout.addStretch()
+        for control in self.default_controls.values():
+            if isinstance(control, QLineEdit): control.textChanged.connect(self.mark_settings_dirty)
+            elif isinstance(control, QComboBox): control.currentIndexChanged.connect(self.mark_settings_dirty)
+        self.reuse_failed_projects.stateChanged.connect(self.mark_settings_dirty)
+        self.power_action.currentIndexChanged.connect(self.mark_settings_dirty)
+        self.update_panel.automatic.stateChanged.connect(self.mark_settings_dirty)
         for group in body.findChildren(QGroupBox):
             form = group.layout()
             if not isinstance(form, QFormLayout):
@@ -753,6 +760,53 @@ class MainWindow(QMainWindow):
     def build_about(self):
         from qt_about import about_page
         self.pages.addWidget(about_page(self.open_path, lambda: self.show_updates(check=True)))
+
+    def navigate_page(self, index):
+        current = self.pages.currentIndex()
+        if current == 1 and index != current and self.settings_dirty:
+            choice = QMessageBox.question(
+                self, '设置尚未保存', '设置页面有未保存的改动，要保存后再离开吗？',
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+            if choice == QMessageBox.StandardButton.Cancel:
+                self.nav_group.button(current).setChecked(True)
+                return
+            if choice == QMessageBox.StandardButton.Save:
+                if not self.save_settings_clicked():
+                    self.nav_group.button(current).setChecked(True)
+                    return
+            else:
+                self.restore_settings_controls()
+        self.pages.setCurrentIndex(index)
+
+    def mark_settings_dirty(self, *_):
+        self.settings_dirty = True
+
+    def restore_settings_controls(self):
+        controls = list(self.default_controls.values())
+        for control in controls:
+            control.blockSignals(True)
+        self.reuse_failed_projects.blockSignals(True)
+        self.power_action.blockSignals(True)
+        self.update_panel.automatic.blockSignals(True)
+        try:
+            self.default_controls['output_root'].setText(str(self.defaults.output_root))
+            self.default_controls['python'].setText(str(self.defaults.python))
+            index = self.gpu_choice.findData(self.defaults.gpu_index)
+            if index >= 0: self.gpu_choice.setCurrentIndex(index)
+            self.reuse_failed_projects.setChecked(self.tasks.reuse_failed_projects)
+            saved_action = self.config.get('queue_power_action', 'shutdown')
+            index = self.power_action.findData(saved_action)
+            self.power_action.setCurrentIndex(index if index >= 0 else 0)
+            self.update_panel.automatic.setChecked(self.config.get('check_updates_on_startup', True) is not False)
+        finally:
+            for control in controls:
+                control.blockSignals(False)
+            self.reuse_failed_projects.blockSignals(False)
+            self.power_action.blockSignals(False)
+            self.update_panel.automatic.blockSignals(False)
+        self.update_queue_poweroff_label()
+        self.settings_dirty = False
 
     def notify_update(self, version):
         self.sidebar_update.setText(f'更新至 {version}')
@@ -1701,8 +1755,11 @@ class MainWindow(QMainWindow):
                                queue_power_action=self.power_action.currentData() or 'shutdown')
             self.save_preferences()
             self.tasks.reuse_failed_projects = self.reuse_failed_projects.isChecked()
+            self.settings_dirty = False
             self.settings_note.setText('设置已保存。路径、处理显卡与运行环境偏好将用于后续新建的任务。'); self.refresh_projects()
+            return True
         except (OSError, ValueError) as error: self.show_error(error)
+        return False
 
     def persist_tasks(self):
         try:
@@ -1730,6 +1787,17 @@ class MainWindow(QMainWindow):
             self.update_panel.status.setText('正在取消下载，完成后关闭软件…')
             QTimer.singleShot(250, self.close)
             event.ignore(); return
+        if self.settings_dirty:
+            choice = QMessageBox.question(
+                self, '设置尚未保存', '设置页面有未保存的改动，要保存后退出吗？',
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard |
+                QMessageBox.StandardButton.Cancel, QMessageBox.StandardButton.Save)
+            if choice == QMessageBox.StandardButton.Cancel:
+                event.ignore(); return
+            if choice == QMessageBox.StandardButton.Save and not self.save_settings_clicked():
+                event.ignore(); return
+            if choice == QMessageBox.StandardButton.Discard:
+                self.restore_settings_controls()
         try:
             self.persist_tasks()
             # Save current defaults using the explicit settings action; preserve unfinished form edits.

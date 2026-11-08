@@ -453,6 +453,17 @@ class DesktopTests(unittest.TestCase):
                           if child.text().startswith('版本 ')]
         self.assertIn('版本 ' + APP_VERSION, version_labels)
 
+    def test_unsaved_settings_prompt_before_leaving_settings(self):
+        window = self.window
+        window.nav_group.button(1).click(); self.app.processEvents()
+        original = window.default_controls['python'].text()
+        window.default_controls['python'].setText(original + '-changed')
+        self.assertTrue(window.settings_dirty)
+        with patch('qt_app.QMessageBox.question', return_value=QMessageBox.StandardButton.Discard):
+            window.nav_group.button(0).click(); self.app.processEvents()
+        self.assertEqual(window.pages.currentIndex(), 0)
+        self.assertFalse(window.settings_dirty)
+
     def test_gpu_selection_is_detected_saved_and_used_for_new_tasks(self):
         window = self.window
         profile = dict(cpu='Test CPU', system_label='Windows 11', gpu_index=0, cuda_usable=True,
