@@ -80,6 +80,7 @@ QCheckBox { spacing: 8px; padding: 5px 0; }
 QCheckBox::indicator { width: 14px; height: 14px; }
 QProgressBar { border: 0; border-radius: 2px; background: #e6e9ef; max-height: 4px; text-align: center; }
 QProgressBar::chunk { background: #2f6bff; border-radius: 2px; }
+QProgressBar#updateProgress { min-height: 8px; max-height: 8px; }
 QScrollArea { background: transparent; border: none; }
 QScrollBar:vertical { background: #f5f6f8; width: 9px; margin: 0; }
 QScrollBar::handle:vertical { background: #ced3dc; min-height: 30px; border-radius: 4px; }

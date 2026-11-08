@@ -4,7 +4,8 @@ import queue
 import threading
 
 from PySide6.QtCore import QTimer, Qt, Signal
-from PySide6.QtWidgets import QGroupBox, QVBoxLayout, QHBoxLayout, QCheckBox, QProgressBar
+from PySide6.QtWidgets import (QGroupBox, QVBoxLayout, QHBoxLayout, QCheckBox,
+    QProgressBar, QSizePolicy)
 
 from app_info import APP_VERSION
 from hotfix import safe_path
@@ -30,7 +31,10 @@ class UpdatePanel(QGroupBox):
         self.status.setTextFormat(Qt.TextFormat.PlainText); layout.addWidget(self.status)
         self.notes = label(''); self.notes.setTextFormat(Qt.TextFormat.PlainText)
         self.notes.hide(); layout.addWidget(self.notes)
-        self.progress = QProgressBar(); self.progress.setRange(0, 100)
+        self.progress = QProgressBar(); self.progress.setObjectName('updateProgress')
+        self.progress.setRange(0, 100); self.progress.setValue(0)
+        self.progress.setTextVisible(False); self.progress.setMinimumHeight(8)
+        self.progress.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.progress.hide(); layout.addWidget(self.progress)
         row = QHBoxLayout()
         self.check_button = button('检查更新', self.check_updates); row.addWidget(self.check_button)
@@ -116,11 +120,13 @@ class UpdatePanel(QGroupBox):
                 self.progress.setValue(int(received / total * 100))
                 self.status.setText(f'正在下载并校验：{received / 2**20:.2f} / {total / 2**20:.2f} MiB')
             elif kind in ('prepared', 'download_error'):
-                self.downloading = False; self.progress.hide(); self.cancel_button.hide()
+                self.downloading = False; self.cancel_button.hide()
                 if kind == 'prepared':
                     self.package = value
+                    self.progress.setValue(100); self.progress.show()
                     self.status.setText('热补丁已下载并通过校验，点击「安装并重启」完成更新。')
                 else:
+                    self.progress.hide()
                     self.status.setText(value)
             self.refresh_actions()
         if not self.checking and not self.downloading:
