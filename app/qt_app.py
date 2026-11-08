@@ -737,10 +737,6 @@ class MainWindow(QMainWindow):
         row.addWidget(self.blender_add_button, 1)
         row.addWidget(button('重新扫描', self.cache_blender_versions))
         form.addRow(row); layout.addWidget(group)
-        group, form = settings_form('日志')
-        note = label('任务日志保存在各自项目的 log 文件夹。软件启动与运行诊断日志保存在软件目录的 logs 文件夹。')
-        note.setWordWrap(True); form.addRow(note)
-        form.addRow(button('查看软件运行日志…', self.open_logs)); layout.addWidget(group)
         row = QHBoxLayout(); row.addStretch(); row.addWidget(button('保存设置', self.save_settings_clicked, True)); layout.addLayout(row)
         self.settings_note = label(''); layout.addWidget(self.settings_note); layout.addStretch()
         for group in body.findChildren(QGroupBox):
