@@ -5,7 +5,7 @@ import threading
 
 from PySide6.QtCore import QTimer, Qt, Signal
 from PySide6.QtWidgets import (QGroupBox, QVBoxLayout, QHBoxLayout, QCheckBox,
-    QProgressBar, QSizePolicy)
+    QProgressBar, QSizePolicy, QTextBrowser, QFrame)
 
 from app_info import APP_VERSION
 from hotfix import safe_path
@@ -29,7 +29,11 @@ class UpdatePanel(QGroupBox):
         self.automatic.setChecked(automatic); layout.addWidget(self.automatic)
         self.status = label(f'当前版本 {APP_VERSION} · 通过 GitHub Release 获取热补丁。')
         self.status.setTextFormat(Qt.TextFormat.PlainText); layout.addWidget(self.status)
-        self.notes = label(''); self.notes.setTextFormat(Qt.TextFormat.PlainText)
+        self.notes = QTextBrowser(); self.notes.setObjectName('updateNotes')
+        self.notes.setReadOnly(True); self.notes.setOpenExternalLinks(True); self.notes.setOpenLinks(True)
+        self.notes.setFrameShape(QFrame.Shape.NoFrame); self.notes.setMarkdown('')
+        self.notes.setMinimumHeight(80); self.notes.setMaximumHeight(300)
+        self.notes.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self.notes.hide(); layout.addWidget(self.notes)
         self.progress = QProgressBar(); self.progress.setObjectName('updateProgress')
         self.progress.setRange(0, 100); self.progress.setValue(0)
@@ -106,7 +110,8 @@ class UpdatePanel(QGroupBox):
                         self.package = None
                     self.available = document
                     self.status.setText(f"发现新版本 {document['version']} · 热补丁 {document['package']['bytes'] / 2**20:.2f} MiB")
-                    self.notes.setText(document.get('notes', '')[:8000]); self.notes.setVisible(bool(self.notes.text()))
+                    notes = document.get('notes', '')[:8000]
+                    self.notes.setMarkdown(notes); self.notes.setVisible(bool(notes.strip()))
                     self.update_available.emit(document['version'])
                 else:
                     self.available = self.package = None; self.notes.hide()
