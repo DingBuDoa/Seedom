@@ -631,6 +631,12 @@ void OptionManager::AddBundleAdjustmentOptions() {
   // Solver-agnostic options
   AddDefaultOption("BundleAdjustment.refine_focal_length",
                    &bundle_adjustment->refine_focal_length);
+  AddDefaultOption("BundleAdjustment.dynamic_focal_length",
+                   &bundle_adjustment->dynamic_focal_length);
+  AddDefaultOption("BundleAdjustment.dynamic_focal_first_order_weight",
+                   &bundle_adjustment->dynamic_focal_first_order_weight);
+  AddDefaultOption("BundleAdjustment.dynamic_focal_second_order_weight",
+                   &bundle_adjustment->dynamic_focal_second_order_weight);
   AddDefaultOption("BundleAdjustment.refine_principal_point",
                    &bundle_adjustment->refine_principal_point);
   AddDefaultOption("BundleAdjustment.refine_extra_params",

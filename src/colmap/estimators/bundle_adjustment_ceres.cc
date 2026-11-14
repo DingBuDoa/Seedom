@@ -6,6 +6,7 @@
 #include "colmap/estimators/ceres_loss_function.h"
 #include "colmap/estimators/cost_functions/manifold.h"
 #include "colmap/estimators/cost_functions/pose_prior.h"
+#include "colmap/estimators/cost_functions/dynamic_focal.h"
 #include "colmap/estimators/cost_functions/reprojection_error.h"
 #include "colmap/estimators/cost_functions/utils.h"
 #include "colmap/util/cuda.h"
@@ -14,6 +15,7 @@
 #include "colmap/util/threading.h"
 
 #include <cmath>
+#include <algorithm>
 #include <iomanip>
 
 namespace colmap {
@@ -423,6 +425,74 @@ void ParameterizeCameras(const BundleAdjustmentOptions& options,
   }
 }
 
+void AddDynamicFocalSmoothness(const BundleAdjustmentOptions& options,
+                               const BundleAdjustmentConfig& config,
+                               Reconstruction& reconstruction,
+                               ceres::Problem& problem) {
+  if (!options.dynamic_focal_length ||
+      config.DynamicFocalCameraGroups().empty()) {
+    return;
+  }
+
+  for (const auto& group : config.DynamicFocalCameraGroups()) {
+    if (group.size() < 2) {
+      continue;
+    }
+
+    for (size_t i = 1; i < group.size(); ++i) {
+      Camera& previous = reconstruction.Camera(group[i - 1]);
+      Camera& current = reconstruction.Camera(group[i]);
+      const auto previous_focal_idxs = previous.FocalLengthIdxs();
+      const auto current_focal_idxs = current.FocalLengthIdxs();
+      if (previous.model_id != current.model_id ||
+          previous.params.size() != current.params.size() ||
+          previous_focal_idxs.size() != current_focal_idxs.size() ||
+          previous_focal_idxs.empty()) {
+        LOG(WARNING) << "Skipping dynamic focal constraint between cameras "
+                     << previous.camera_id << " and " << current.camera_id
+                     << " because their camera models differ.";
+        continue;
+      }
+
+      const std::vector<size_t> focal_idxs(previous_focal_idxs.begin(),
+                                           previous_focal_idxs.end());
+      const double image_scale = static_cast<double>(std::max(
+          std::max(previous.width, previous.height),
+          std::max(current.width, current.height)));
+      const double normalized_scale = image_scale > 0.0 ? 1.0 / image_scale
+                                                        : 1.0;
+
+      if (options.dynamic_focal_first_order_weight > 0.0) {
+        problem.AddResidualBlock(
+            DynamicFocalLengthDifferenceCostFunctor::Create(
+                focal_idxs,
+                previous.params.size(),
+                options.dynamic_focal_first_order_weight * normalized_scale),
+            nullptr,
+            previous.params.data(),
+            current.params.data());
+      }
+
+      if (options.dynamic_focal_second_order_weight > 0.0 && i >= 2) {
+        Camera& before_previous = reconstruction.Camera(group[i - 2]);
+        if (before_previous.model_id != previous.model_id ||
+            before_previous.params.size() != previous.params.size()) {
+          continue;
+        }
+        problem.AddResidualBlock(
+            DynamicFocalLengthSecondDifferenceCostFunctor::Create(
+                focal_idxs,
+                before_previous.params.size(),
+                options.dynamic_focal_second_order_weight * normalized_scale),
+            nullptr,
+            before_previous.params.data(),
+            previous.params.data(),
+            current.params.data());
+      }
+    }
+  }
+}
+
 void ParameterizeRigsAndFrames(const BundleAdjustmentOptions& options,
                                const BundleAdjustmentConfig& config,
                                const std::set<image_t>& image_ids,
@@ -616,6 +686,8 @@ class DefaultBundleAdjuster : public CeresBundleAdjuster {
                         parameterized_camera_ids_,
                         reconstruction,
                         *problem_);
+    AddDynamicFocalSmoothness(
+        options_, config_, reconstruction, *problem_);
     ParameterizeRigsAndFrames(
         options_, config_, parameterized_image_ids_, reconstruction, *problem_);
     ParameterizePoints(options_,

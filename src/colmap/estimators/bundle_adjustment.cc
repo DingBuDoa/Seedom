@@ -127,6 +127,16 @@ bool BundleAdjustmentConfig::HasConstantCamIntrinsics(
          constant_cam_intrinsics_.end();
 }
 
+void BundleAdjustmentConfig::SetDynamicFocalCameraGroups(
+    std::vector<std::vector<camera_t>> camera_groups) {
+  dynamic_focal_camera_groups_ = std::move(camera_groups);
+}
+
+const std::vector<std::vector<camera_t>>&
+BundleAdjustmentConfig::DynamicFocalCameraGroups() const {
+  return dynamic_focal_camera_groups_;
+}
+
 void BundleAdjustmentConfig::SetConstantSensorFromRigPose(
     const sensor_t sensor_id) {
   constant_sensor_from_rig_poses_.insert(sensor_id);
@@ -281,6 +291,11 @@ BundleAdjustmentBackendOptions& BundleAdjustmentBackendOptions::operator=(
 }
 
 bool BundleAdjustmentOptions::Check() const {
+  CHECK_OPTION_GE(dynamic_focal_first_order_weight, 0.0);
+  CHECK_OPTION_GE(dynamic_focal_second_order_weight, 0.0);
+  if (dynamic_focal_length) {
+    CHECK_OPTION(refine_focal_length);
+  }
   return THROW_CHECK_NOTNULL(ceres)->Check();
 }
 

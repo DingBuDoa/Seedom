@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <memory>
+#include <vector>
 
 #include <Eigen/Core>
 
@@ -82,6 +83,13 @@ class BundleAdjustmentConfig {
   void SetVariableCamIntrinsics(camera_t camera_id);
   bool HasConstantCamIntrinsics(camera_t camera_id) const;
 
+  // Configure ordered camera groups whose focal lengths belong to the same
+  // temporal zoom segment. Adjacent cameras in a group receive native BA
+  // smoothness constraints when dynamic focal optimization is enabled.
+  void SetDynamicFocalCameraGroups(
+      std::vector<std::vector<camera_t>> camera_groups);
+  const std::vector<std::vector<camera_t>>& DynamicFocalCameraGroups() const;
+
   // Set the sensor-from-rig extrinsic pose as constant or variable.
   void SetConstantSensorFromRigPose(sensor_t sensor_id);
   void SetVariableSensorFromRigPose(sensor_t sensor_id);
@@ -115,6 +123,7 @@ class BundleAdjustmentConfig {
  private:
   BundleAdjustmentGauge fixed_gauge_ = BundleAdjustmentGauge::UNSPECIFIED;
   FlatHashSet<camera_t> constant_cam_intrinsics_;
+  std::vector<std::vector<camera_t>> dynamic_focal_camera_groups_;
   FlatHashSet<image_t> image_ids_;
   FlatHashSet<point3D_t> variable_point3D_ids_;
   FlatHashSet<point3D_t> constant_point3D_ids_;
@@ -147,6 +156,16 @@ struct BundleAdjustmentBackendOptions {
 struct BundleAdjustmentOptions : public BundleAdjustmentBackendOptions {
   // Whether to refine the focal length parameter group.
   bool refine_focal_length = true;
+
+  // Whether to add native temporal smoothness constraints for focal lengths.
+  // Camera groups and their temporal order are provided through
+  // BundleAdjustmentConfig::SetDynamicFocalCameraGroups().
+  bool dynamic_focal_length = false;
+
+  // First- and second-order smoothness weights in normalized focal units.
+  // Zero disables the corresponding residual family.
+  double dynamic_focal_first_order_weight = 0.0;
+  double dynamic_focal_second_order_weight = 0.0;
 
   // Whether to refine the principal point parameter group.
   bool refine_principal_point = false;

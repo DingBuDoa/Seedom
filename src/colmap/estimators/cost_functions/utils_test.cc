@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include "colmap/estimators/cost_functions/utils.h"
+#include "colmap/estimators/cost_functions/dynamic_focal.h"
 
 #include "colmap/util/eigen_matchers.h"
 
@@ -49,6 +50,35 @@ TEST(NormalErrorCostFunctor, Nominal) {
   EXPECT_TRUE(cost_function->Evaluate(parameters, residuals.data(), nullptr));
   EXPECT_THAT(residuals,
               EigenMatrixNear(Eigen::Vector3d(param0 - param1), 1e-10));
+}
+
+TEST(DynamicFocalLengthDifferenceCostFunctor, Nominal) {
+  const std::vector<size_t> focal_indices = {0, 1};
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      DynamicFocalLengthDifferenceCostFunctor::Create(
+          focal_indices, /*num_camera_params=*/4, /*weight=*/2.0));
+
+  const double camera0[4] = {100.0, 110.0, 320.0, 240.0};
+  const double camera1[4] = {104.0, 114.0, 320.0, 240.0};
+  const double* parameters[2] = {camera0, camera1};
+  double residual = 0.0;
+  ASSERT_TRUE(cost_function->Evaluate(parameters, &residual, nullptr));
+  EXPECT_DOUBLE_EQ(residual, -8.0);
+}
+
+TEST(DynamicFocalLengthSecondDifferenceCostFunctor, Nominal) {
+  const std::vector<size_t> focal_indices = {0};
+  std::unique_ptr<ceres::CostFunction> cost_function(
+      DynamicFocalLengthSecondDifferenceCostFunctor::Create(
+          focal_indices, /*num_camera_params=*/2, /*weight=*/3.0));
+
+  const double camera0[2] = {100.0, 0.0};
+  const double camera1[2] = {105.0, 0.0};
+  const double camera2[2] = {111.0, 0.0};
+  const double* parameters[3] = {camera0, camera1, camera2};
+  double residual = 0.0;
+  ASSERT_TRUE(cost_function->Evaluate(parameters, &residual, nullptr));
+  EXPECT_DOUBLE_EQ(residual, 1.0 * 3.0);
 }
 
 TEST(CovarianceWeightedCostFunctor, NormalPriorCostFunctor) {
