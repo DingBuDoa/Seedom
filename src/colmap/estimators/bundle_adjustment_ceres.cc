@@ -429,12 +429,29 @@ void AddDynamicFocalSmoothness(const BundleAdjustmentOptions& options,
                                const BundleAdjustmentConfig& config,
                                Reconstruction& reconstruction,
                                ceres::Problem& problem) {
-  if (!options.dynamic_focal_length ||
-      config.DynamicFocalCameraGroups().empty()) {
+  if (!options.dynamic_focal_length) {
     return;
   }
 
-  for (const auto& group : config.DynamicFocalCameraGroups()) {
+  // Mapper callers do not need to construct an internal config just to use
+  // temporal focal regularization. Camera ids are allocated in temporal
+  // order by Seedom's auto-focal database preparation, so use that order as
+  // the default group when no explicit groups were supplied.
+  std::vector<std::vector<camera_t>> automatic_groups;
+  const auto* groups = &config.DynamicFocalCameraGroups();
+  if (groups->empty()) {
+    std::vector<camera_t> group;
+    group.reserve(reconstruction.Cameras().size());
+    for (const auto& [camera_id, camera] : reconstruction.Cameras()) {
+      group.push_back(camera_id);
+    }
+    if (group.size() >= 2) {
+      automatic_groups.push_back(std::move(group));
+    }
+    groups = &automatic_groups;
+  }
+
+  for (const auto& group : *groups) {
     if (group.size() < 2) {
       continue;
     }

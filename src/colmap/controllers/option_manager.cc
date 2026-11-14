@@ -754,6 +754,12 @@ void OptionManager::AddMapperOptions() {
   AddDefaultOption("Mapper.max_extra_param", &mapper->max_extra_param);
   AddDefaultOption("Mapper.ba_refine_focal_length",
                    &mapper->ba_refine_focal_length);
+  AddDefaultOption("Mapper.ba_dynamic_focal_length",
+                   &mapper->ba_dynamic_focal_length);
+  AddDefaultOption("Mapper.ba_dynamic_focal_first_order_weight",
+                   &mapper->ba_dynamic_focal_first_order_weight);
+  AddDefaultOption("Mapper.ba_dynamic_focal_second_order_weight",
+                   &mapper->ba_dynamic_focal_second_order_weight);
   AddDefaultOption("Mapper.ba_refine_principal_point",
                    &mapper->ba_refine_principal_point);
   AddDefaultOption("Mapper.ba_refine_extra_params",

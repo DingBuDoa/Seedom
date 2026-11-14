@@ -80,6 +80,13 @@ struct IncrementalPipelineOptions {
   bool ba_refine_principal_point = false;
   bool ba_refine_extra_params = true;
 
+  // Enable native temporal smoothness constraints for focal lengths. When
+  // enabled, COLMAP groups the reconstructed cameras by camera id unless an
+  // explicit group configuration is supplied by the caller.
+  bool ba_dynamic_focal_length = false;
+  double ba_dynamic_focal_first_order_weight = 10.0;
+  double ba_dynamic_focal_second_order_weight = 2.0;
+
   // Whether to optimize rig poses during the reconstruction.
   bool ba_refine_sensor_from_rig = true;
 

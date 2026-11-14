@@ -173,6 +173,11 @@ BundleAdjustmentOptions IncrementalPipelineOptions::LocalBundleAdjustment()
   options.print_summary = false;
   options.backend = ba_local_backend;
   options.refine_focal_length = ba_refine_focal_length;
+  options.dynamic_focal_length = ba_dynamic_focal_length;
+  options.dynamic_focal_first_order_weight =
+      ba_dynamic_focal_first_order_weight;
+  options.dynamic_focal_second_order_weight =
+      ba_dynamic_focal_second_order_weight;
   options.refine_principal_point = ba_refine_principal_point;
   options.refine_extra_params = ba_refine_extra_params;
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
@@ -225,6 +230,11 @@ BundleAdjustmentOptions IncrementalPipelineOptions::GlobalBundleAdjustment()
   options.print_summary = false;
   options.backend = ba_global_backend;
   options.refine_focal_length = ba_refine_focal_length;
+  options.dynamic_focal_length = ba_dynamic_focal_length;
+  options.dynamic_focal_first_order_weight =
+      ba_dynamic_focal_first_order_weight;
+  options.dynamic_focal_second_order_weight =
+      ba_dynamic_focal_second_order_weight;
   options.refine_principal_point = ba_refine_principal_point;
   options.refine_extra_params = ba_refine_extra_params;
   options.refine_sensor_from_rig = ba_refine_sensor_from_rig;
