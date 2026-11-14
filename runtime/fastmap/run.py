@@ -20,6 +20,8 @@ def run(args):
         calibrated=args.calibrated,
         image_dir=args.image_dir,
         gt_model_path=args.gt_model,
+        smooth_focal=args.smooth_focal,
+        rotation_only=args.rotation_only,
     )
 
 
@@ -59,6 +61,16 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="Path to ground truth model (e.g. otuput of colmap) for debugging purposes.",
+    )
+    parser.add_argument(
+        "--smooth-focal",
+        action="store_true",
+        help="Regularize focal changes between consecutive segmented cameras.",
+    )
+    parser.add_argument(
+        "--rotation-only",
+        action="store_true",
+        help="Export a camera-only trajectory when low parallax indicates near-pure-rotation motion.",
     )
     args = parser.parse_args()
 

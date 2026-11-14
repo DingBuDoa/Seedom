@@ -7,6 +7,45 @@ from fastmap.utils import to_homogeneous
 
 
 @torch.no_grad()
+def stabilize_focals(
+    cameras: Cameras,
+    min_ratio: float = 0.55,
+    max_ratio: float = 1.8,
+    max_step_ratio: float = 1.15,
+):
+    """Keep initial focal estimates physically plausible for one continuous shot.
+
+    Short temporal segments often do not contain enough parallax to estimate
+    focal length independently.  The raw vote can therefore jump by several
+    times between adjacent segments and make pose optimization absorb the
+    error as a large translation.  Limit each segment's change relative to
+    the previous one while retaining a gradual real zoom trend.
+    """
+    if cameras.num_cameras < 1:
+        return
+    prior = cameras.focal_prior.clamp_min(1e-6)
+    ratio = (cameras.focal / prior).clamp(min_ratio, max_ratio)
+    step = float(max_step_ratio)
+    if step <= 1.0:
+        step = 1.15
+    lower_step, upper_step = 1.0 / step, step
+    stabilized = torch.empty_like(ratio)
+    stabilized[0] = ratio[0]
+    for index in range(1, ratio.numel()):
+        stabilized[index] = torch.clamp(
+            ratio[index],
+            stabilized[index - 1] * lower_step,
+            stabilized[index - 1] * upper_step,
+        )
+    cameras.focal.copy_(prior * stabilized)
+    logger.info(
+        f"[FOCAL_STABILIZED] {cameras.num_cameras} segments; "
+        f"absolute ratio {min_ratio:.2f}-{max_ratio:.2f}, "
+        f"max adjacent ratio {max_step_ratio:.2f}"
+    )
+
+
+@torch.no_grad()
 def estimate_focals(
     cameras: Cameras,
     matches: Matches,

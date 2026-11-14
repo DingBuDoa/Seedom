@@ -13,7 +13,7 @@ import threading
 import time
 import uuid
 
-from paths import ROOT, APP, FASTMAP, PYTHON, OUTPUTS, BINARY_DIRS, runtime_environment
+from paths import ROOT, APP, FASTMAP, PYTHON, OUTPUTS, BINARY_DIRS, DEV_COLMAP, runtime_environment
 from hardware import get_hardware, describe_hardware, settings_signature
 from workload import source_signature, video_scene, describe_workload
 from native_paths import NativePaths
@@ -21,6 +21,7 @@ from project_layout import create_project, cache_directory, result_report, safe_
 from json_store import atomic_write_json
 from task_progress import TaskProgress
 from solver_quality import SOLVER_PROFILES, OPTIMIZATION_REVISION
+from zoom_focal import prepare_auto_focal_database
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.avi', '.m4v', '.webm', '.mts', '.m2ts', '.wmv', '.mpg', '.mpeg'}
 HIDE_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
@@ -31,7 +32,7 @@ class Cancelled(Exception):
 
 @dataclass
 class Options:
-    backend: str = 'fastmap'
+    backend: str = 'colmap'
     output_root: str = str(OUTPUTS)
     python: str = str(PYTHON)
     fps: float = 0
@@ -41,12 +42,15 @@ class Options:
     color: bool = True
     camera_mode: str = 'radial'
     gpu_min_images: int = 50
-    glomap_gpu: bool = True
+    glomap_gpu: bool = False
     image_scale: float = 1.0
     export_sequence: bool = False
     sequence_original: bool = False
     solver_quality: str = 'balanced'
     gpu_index: int = 0
+    auto_focal: bool = False
+    contains_cuts: bool = False
+    rotation_only: bool = False
 
     def validate(self):
         for key in ('fps', 'image_scale'):
@@ -56,20 +60,25 @@ class Options:
         for key in ('max_size', 'overlap', 'gpu_min_images', 'gpu_index'):
             if type(getattr(self, key)) is not int:
                 raise ValueError(f'{key} 必须是整数')
-        for key in ('cuda_decode', 'color', 'glomap_gpu', 'export_sequence', 'sequence_original'):
+        for key in ('cuda_decode', 'color', 'glomap_gpu', 'export_sequence', 'sequence_original', 'auto_focal', 'contains_cuts', 'rotation_only'):
             if type(getattr(self, key)) is not bool:
                 raise ValueError(f'{key} 必须是布尔值')
         for key in ('python', 'output_root'):
             if not isinstance(getattr(self, key), str) or not getattr(self, key).strip():
                 raise ValueError(f'{key} 路径不能为空')
-        if self.backend not in ('fastmap', 'glomap') or self.camera_mode not in ('radial', 'pinhole', 'calibrated'):
+        # Migrate saved 1.x tasks that still carry the retired GLOMAP key.
+        if self.backend == 'glomap':
+            self.backend = 'colmap'
+        if self.backend not in ('fastmap', 'colmap') or self.camera_mode not in ('radial', 'pinhole', 'calibrated'):
             raise ValueError('未知求解器或相机模式')
+        if self.rotation_only and self.backend != 'fastmap':
+            raise ValueError('低视差仅旋转保护目前只支持 FastMap')
         if not isinstance(self.solver_quality, str) or self.solver_quality not in SOLVER_PROFILES:
             raise ValueError('未知计算精度')
         if not 0 <= self.fps <= 240 or not 256 <= self.max_size <= 16384 or not 1 <= self.overlap <= 200:
             raise ValueError('抽帧率、图像尺寸或匹配范围超出允许范围')
         if not 2 <= self.gpu_min_images <= 1000000:
-            raise ValueError('GLOMAP GPU 最少图像数需要不小于 2')
+            raise ValueError('GPU 最少图像数需要不小于 2')
         if self.gpu_index < 0:
             raise ValueError('GPU 编号不能小于 0')
         if not 0.1 <= self.image_scale <= 1:
@@ -82,6 +91,8 @@ def find_binary(folder, name):
         path = directory / name
         if path.is_file():
             return path
+    if folder == '01 GLOMAP' and name == 'colmap.exe' and DEV_COLMAP.is_file():
+        return DEV_COLMAP
     raise FileNotFoundError(f'找不到 {folder}/{name}')
 
 
@@ -115,7 +126,7 @@ class Pipeline:
     def warn_solver(self, code, text):
         if any(item['code'] == code for item in self.warnings):
             return
-        filename = '04-fastmap.log' if self.options.backend == 'fastmap' else '04-glomap.log'
+        filename = '04-fastmap.log' if self.options.backend == 'fastmap' else '04-colmap.log'
         warning = dict(code=code, text=text, log_path=str(self.log_dir / filename))
         self.warnings.append(warning)
         self.emit('log', text=f"[求解提醒] {text} 日志：{warning['log_path']}\n")
@@ -130,6 +141,17 @@ class Pipeline:
             self.warn_solver('cpu_fallback', 'GLOMap 已回退到 CPU，任务将继续求解和导出，处理速度可能降低。')
 
     def observe_fastmap_output(self, line):
+        if '[LOW_PARALLAX]' in line:
+            try:
+                payload = json.loads(line.split('[LOW_PARALLAX]', 1)[1].strip())
+                if payload.get('low'):
+                    self.warn_solver(
+                        'low_parallax',
+                        '检测到低视差/近似纯旋转运动；普通模式的点云深度可能不稳定，'
+                        '仅旋转模式会只输出相机旋转轨迹。',
+                    )
+            except (ValueError, TypeError, AttributeError):
+                pass
         if not line.startswith('[POINTSTUDIO_OPTIMIZATION] '):
             return
         try:
@@ -228,6 +250,7 @@ class Pipeline:
         destination = cache / 'retry_history' / (datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6])
         destination.mkdir(parents=True)
         for name in ('source.json', 'images', 'database.db', 'database.db-wal', 'database.db-shm',
+                     'database-auto-focal.db', 'auto-focal.json',
                      '.frames-complete', '.features-complete', '.matching-complete'):
             path = cache / name
             if path.exists() or path.is_symlink():
@@ -360,10 +383,9 @@ class Pipeline:
                 if not p.is_file():
                     raise FileNotFoundError(p)
         else:
-            folder = '01 GLOMAP GPU' if o.glomap_gpu else '01 GLOMAP'
-            find_binary(folder, 'glomap.exe')
-            if o.glomap_gpu:
-                find_binary(folder, 'gpu_solver_probe.exe')
+            # COLMAP is the native 2.0 solver. Its CPU Ceres mapper does not
+            # require the retired GLOMAP binary or CUDA/cuDSS probe.
+            find_binary('01 GLOMAP', 'colmap.exe')
 
     def prepare_video(self, video):
         o = self.options
@@ -479,7 +501,21 @@ class Pipeline:
         counts = database_counts(database)
         if counts['images'] < 3 or counts['pairs'] < 2:
             raise RuntimeError(f'有效图像/匹配不足：{counts}')
-        mode = 'fastmap' if o.backend == 'fastmap' else ('glomap-gpu' if o.glomap_gpu else 'glomap-cpu')
+        solve_database = database
+        auto_focal_report = None
+        if o.auto_focal:
+            solve_database = cache / 'database-auto-focal.db'
+            auto_focal_report = prepare_auto_focal_database(
+                database, solve_database, cache / 'auto-focal.json',
+                images_dir=images, detect_cuts=o.contains_cuts)
+            segment_count = len(auto_focal_report['segments'])
+            if segment_count < 1:
+                raise RuntimeError('自动焦距没有生成有效的相机分段。')
+            focal_mode = '切镜检测' if o.contains_cuts else '连续镜头平滑'
+            self.emit('log', text=(
+                f'[自动焦距] 已使用“{focal_mode}”建立 {segment_count} 个焦距段，'
+                f'每段约 {auto_focal_report["target_frames"]} 帧；原始数据库保留不变。\n'))
+        mode = 'fastmap' if o.backend == 'fastmap' else 'colmap-cpu'
         run_id = datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6]
         result = self.project_dir / '_cache' / ('solve_' + run_id)
         self.emit('stage', index=4, total=5, text=f'{mode} 相机与点云求解')
@@ -487,12 +523,16 @@ class Pipeline:
         gpu_solver_active = o.backend == 'fastmap'
         if o.backend == 'fastmap':
             args = [o.python, '-u', APP / 'fastmap_worker.py', '--device', f'cuda:{o.gpu_index}',
-                    '--headless', '--database', database, '--output_dir', result,
+                    '--headless', '--database', solve_database, '--output_dir', result,
                     '--solver-quality', o.solver_quality]
             if o.color:
                 args += ['--image_dir', images]
             if o.camera_mode in ('pinhole', 'calibrated'):
                 args += ['--' + o.camera_mode]
+            if o.auto_focal and not o.contains_cuts:
+                args += ['--smooth-focal']
+            if o.rotation_only:
+                args += ['--rotation-only']
             try:
                 self.command(args, '04-fastmap')
             finally:
@@ -502,48 +542,55 @@ class Pipeline:
             result.mkdir(parents=True)
             sparse = result / 'sparse'
             sparse.mkdir()
-            folder = '01 GLOMAP GPU' if o.glomap_gpu else '01 GLOMAP'
-            glomap = find_binary(folder, 'glomap.exe')
-            args = [glomap, 'mapper', '--database_path', database, '--image_path', images,
+            args = [colmap, 'mapper', '--database_path', solve_database, '--image_path', images,
                     '--output_path', sparse, '--log_to_stderr', '1']
-            env = None
-            if o.glomap_gpu:
-                env = {'PATH': str(glomap.parent) + os.pathsep + runtime_environment()['PATH']}
-                visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
-                selected_device = visible[o.gpu_index].strip() if len(visible) > o.gpu_index and visible[o.gpu_index].strip() else str(o.gpu_index)
-                self.command([find_binary(folder, 'gpu_solver_probe.exe')], '04-gpu-preflight',
-                             env={**env, 'CUDA_VISIBLE_DEVICES': selected_device})
-                for stage in ('GlobalPositioning', 'BundleAdjustment'):
-                    args += [f'--{stage}.use_gpu', '1', f'--{stage}.gpu_index', str(o.gpu_index),
-                             f'--{stage}.min_num_images_gpu_solver', str(o.gpu_min_images)]
-            else:
-                args += ['--GlobalPositioning.use_gpu', '0', '--BundleAdjustment.use_gpu', '0']
-                self.emit('log', text='[提示] 原版 GLOMAP：特征/匹配用 GPU，GP/BA 求解用 CPU。\n')
-            self.command(args, '04-glomap', cwd=glomap.parent, env=env)
-            if o.glomap_gpu:
-                gpu_solver_active = self.verify_glomap_gpu()
+            args += ['--Mapper.ba_use_gpu', '0', '--Mapper.ba_gpu_index', '-1']
+            self.emit('log', text='[求解器] 使用原生 COLMAP Incremental Mapper + Ceres CPU。\n')
+            if o.auto_focal:
+                # The derived database keeps one camera per temporal segment;
+                # COLMAP applies the smoothness residuals inside native Ceres.
+                args += ['--Mapper.ba_refine_focal_length', '1',
+                         '--Mapper.ba_dynamic_focal_length', '1',
+                         '--Mapper.ba_dynamic_focal_first_order_weight', '10',
+                         '--Mapper.ba_dynamic_focal_second_order_weight', '2',
+                         '--Mapper.ba_refine_principal_point', '0']
+                self.emit('log', text='[自动焦距] COLMAP Ceres 将对分段相机执行原生动态焦距平滑 BA；主点保持不变。\n')
+            self.command(args, '04-colmap', cwd=colmap.parent)
         elapsed = time.perf_counter() - started
         model = result / 'sparse/0'
         if not model_complete(model):
             raise RuntimeError(f'未生成完整模型：{model}')
-        self.emit('stage', index=5, total=5, text='导出 Blender TXT 和点云')
+        rotation_only_output = o.backend == 'fastmap' and (result / 'rotation-only.json').is_file()
+        self.emit('stage', index=5, total=5,
+                  text='导出 Blender TXT 和相机轨迹' if rotation_only_output else '导出 Blender TXT 和点云')
         self.command([colmap, 'model_converter', '--input_path', model, '--output_path', model, '--output_type', 'TXT'], '05-export-model')
-        self.command([colmap, 'model_converter', '--input_path', model, '--output_path', model / 'points3D.ply', '--output_type', 'PLY'], '05-export-ply')
-        self.command([colmap, 'model_analyzer', '--path', model], '05-model-analysis')
-        analysis = (self.log_dir / '05-model-analysis.log').read_text(encoding='utf-8')
-        metrics = {}
-        for name, pattern, cast in (
-            ('registered_images', r'Registered images: (\d+)', int),
-            ('points', r'Points: (\d+)', int),
-            ('observations', r'Observations: (\d+)', int),
-            ('mean_reprojection_error_px', r'Mean reprojection error: ([0-9.eE+-]+)', float),
-        ):
-            match = re.search(pattern, analysis)
-            if match:
-                metrics[name] = cast(match.group(1))
-        if not metrics.get('registered_images') or not metrics.get('points'):
-            raise RuntimeError('模型没有有效相机或三维点，请检查输入视频和匹配结果。')
-        if metrics.get('mean_reprojection_error_px', 0) > 2:
+        if rotation_only_output:
+            # COLMAP's PLY converter/analyzer rejects an empty point set on
+            # some bundled builds. A valid empty PLY keeps the model layout
+            # stable while the camera-only Blender path remains usable.
+            ply = model / 'points3D.ply'
+            ply.write_text('ply\nformat ascii 1.0\nelement vertex 0\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nproperty uchar green\nproperty uchar blue\nend_header\n', encoding='ascii')
+            registered = sum(1 for line in (model / 'images.txt').read_text(encoding='utf-8').splitlines()
+                             if line.strip() and not line.startswith('#') and len(line.split()) >= 10)
+            metrics = {'registered_images': registered, 'points': 0, 'observations': 0}
+            self.emit('log', text='[仅旋转] 已生成相机旋转轨迹；点云为空，不提供尺度和三维点。\n')
+        else:
+            self.command([colmap, 'model_converter', '--input_path', model, '--output_path', model / 'points3D.ply', '--output_type', 'PLY'], '05-export-ply')
+            self.command([colmap, 'model_analyzer', '--path', model], '05-model-analysis')
+            analysis = (self.log_dir / '05-model-analysis.log').read_text(encoding='utf-8')
+            metrics = {}
+            for name, pattern, cast in (
+                ('registered_images', r'Registered images: (\d+)', int),
+                ('points', r'Points: (\d+)', int),
+                ('observations', r'Observations: (\d+)', int),
+                ('mean_reprojection_error_px', r'Mean reprojection error: ([0-9.eE+-]+)', float),
+            ):
+                match = re.search(pattern, analysis)
+                if match:
+                    metrics[name] = cast(match.group(1))
+            if not metrics.get('registered_images') or not metrics.get('points'):
+                raise RuntimeError('模型没有有效相机或三维点，请检查输入视频和匹配结果。')
+        if metrics.get('mean_reprojection_error_px') is not None and metrics.get('mean_reprojection_error_px', 0) > 2:
             self.emit('log', text='[质量提示] 平均重投影误差超过 2 像素，建议检查相机轨迹和点云，再决定是否用于正式镜头。\n')
         sequence = None
         if o.export_sequence:
@@ -576,9 +623,12 @@ class Pipeline:
                    'task_wall_seconds': time.perf_counter() - task_started, 'existing_scene': existing_scene,
                    'mapping_wall_seconds': elapsed, 'database': counts, 'metrics': metrics,
                    'gpu_solver_active': gpu_solver_active, 'solver_warnings': list(self.warnings), 'status': 'complete',
+                   'rotation_only': rotation_only_output,
                    'hardware': hardware, 'estimate_settings': settings_signature(o), 'workload': workload,
                    'phase_seconds': self.progress.timings(),
                    'completed_at': datetime.now().isoformat(timespec='seconds')}
+        if auto_focal_report is not None:
+            summary['auto_focal'] = auto_focal_report
         if o.backend == 'fastmap':
             summary['optimization_policy'] = dict(SOLVER_PROFILES[o.solver_quality],
                                                   profile=o.solver_quality, revision=OPTIMIZATION_REVISION)

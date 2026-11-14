@@ -31,6 +31,12 @@ def settings_signature(options):
     if options.export_sequence:
         values['export_sequence'] = True
         values['sequence_original'] = options.sequence_original
+    if options.auto_focal:
+        values['auto_focal'] = True
+        if options.contains_cuts:
+            values['contains_cuts'] = True
+    if options.rotation_only:
+        values['rotation_only'] = True
     if options.backend == 'fastmap':
         values['color'] = options.color
         from solver_quality import OPTIMIZATION_REVISION

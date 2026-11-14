@@ -71,7 +71,7 @@ def duration_text(seconds):
 
 def prediction_range(workload, options, hardware, samples=None):
     """Structured task duration, shared by queue previews and live countdowns."""
-    backend = 'fastmap' if options.backend == 'fastmap' else ('glomap-gpu' if options.glomap_gpu else 'glomap-cpu')
+    backend = 'fastmap' if options.backend == 'fastmap' else 'colmap-cpu'
     settings = settings_signature(options)
     samples = read_samples() if samples is None else samples
     matching = [sample for sample in samples if comparable(
@@ -88,13 +88,14 @@ def prediction_range(workload, options, hardware, samples=None):
 def phase_prediction_ranges(workload, options, hardware, samples=None):
     """Reuse solver timings independently of decoding, outputs and cache state."""
     from task_progress import FASTMAP_STAGES, GLOMAP_STAGES
-    backend = 'fastmap' if options.backend == 'fastmap' else ('glomap-gpu' if options.glomap_gpu else 'glomap-cpu')
+    backend = 'fastmap' if options.backend == 'fastmap' else 'colmap-cpu'
     settings = settings_signature(options)
     ignored = {'fps', 'cuda_decode', 'export_sequence', 'sequence_original'}
     solver_settings = {key: value for key, value in settings.items() if key not in ignored}
     samples = read_samples() if samples is None else samples
     values = {}
-    phases = dict(FASTMAP_STAGES if options.backend == 'fastmap' else GLOMAP_STAGES)
+    from task_progress import COLMAP_STAGES
+    phases = dict(FASTMAP_STAGES if options.backend == 'fastmap' else COLMAP_STAGES)
     for sample in samples:
         if not isinstance(sample, dict) or not isinstance(sample.get('settings'), dict):
             continue

@@ -625,6 +625,7 @@ def loop(
     precision: torch.dtype = torch.float32,
     log_interval: int = 500,
     deadline: float | None = None,
+    focal_smooth_weight: float = 0.0,
 ):
     """Global epipolar adjustment loop.
 
@@ -642,6 +643,8 @@ def loop(
         lr: float, the learning rate for the optimization.
         precision: torch.dtype, the precision for the optimization.
         log_interval: int, the log interval in number of iterations.
+        focal_smooth_weight: float, penalty for curvature (abrupt changes in
+            the zoom rate) between consecutive segmented-camera focal scales.
 
     Returns:
         R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation
@@ -732,6 +735,25 @@ def loop(
                 inv_focal_scale=inv_focal_scale,  # (num_cameras,)
                 W=W,
             )  # scalar, (num_images, 3, 3), (num_images, 3), (num_cameras,)
+            if focal_smooth_weight > 0 and inv_focal_scale.numel() > 2:
+                # Penalize second differences instead of first differences.
+                # A first-difference penalty suppresses a real, steady zoom
+                # and then makes the optimizer compensate with pose changes;
+                # curvature regularization keeps zoom smooth while preserving
+                # a continuous focal-length trend.
+                focal_curvature = (
+                    inv_focal_scale[2:]
+                    - 2.0 * inv_focal_scale[1:-1]
+                    + inv_focal_scale[:-2]
+                )
+                smooth_loss = focal_smooth_weight * focal_curvature.square().mean()
+                smooth_gradient = torch.zeros_like(inv_focal_scale)
+                gradient_scale = 2.0 * focal_smooth_weight / focal_curvature.numel()
+                smooth_gradient[:-2] += gradient_scale * focal_curvature
+                smooth_gradient[1:-1] -= 2.0 * gradient_scale * focal_curvature
+                smooth_gradient[2:] += gradient_scale * focal_curvature
+                d_inv_focal_scale = d_inv_focal_scale + smooth_gradient
+                loss = loss + smooth_loss
             if isinstance(loss, torch.Tensor):
                 loss = loss.item()  # convert to scalar
 
@@ -797,6 +819,7 @@ def epipolar_adjustment(
     lr: float = 1e-4,
     lr_decay: float = 0.5,
     log_interval: int = 500,
+    focal_smooth_weight: float = 0.0,
 ):
     """Globally optimize the epipolar error for all image pairs.
 
@@ -814,6 +837,8 @@ def epipolar_adjustment(
         lr: float, the learning rate for the optimization.
         lr_decay: float, the learning rate decay for each pruning step.
         log_interval: int, the log interval in number of iterations.
+        focal_smooth_weight: float, penalty for abrupt changes between
+            consecutive segmented-camera focal scales.
 
     Returns:
         R_w2c: torch.Tensor float (num_images, 3, 3), w2c global rotation
@@ -882,6 +907,7 @@ def epipolar_adjustment(
                         precision=torch.float32,
                         log_interval=log_interval,
                         deadline=deadline,
+                        focal_smooth_weight=focal_smooth_weight,
                     )
 
             # prune point pairs

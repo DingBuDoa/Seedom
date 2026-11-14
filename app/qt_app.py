@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QStyleOptionViewItem, QStyle, QSizePolicy, QToolTip, QLayout)
 
 from tracker_core import Options, Pipeline, Cancelled
-from paths import ROOT, APP, CONFIG, LOGS, OUTPUTS, BINARY_DIRS, saved_path, portable_path
+from paths import ROOT, APP, CONFIG, LOGS, OUTPUTS, BINARY_DIRS, DEV_COLMAP, saved_path, portable_path
 from project_library import ProjectLibrary, model_ready
 from project_layout import result_directory, result_report, blend_filename
 from estimate import estimate_jobs
@@ -44,7 +44,8 @@ from task_progress import live_remaining
 from system_actions import execute_power_action, power_action_label
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
-SOLVERS = {'fastmap': 'FastMap', 'glomap-gpu': 'GLOMap · GPU', 'glomap-cpu': 'GLOMap · CPU', 'glomap': 'GLOMap'}
+SOLVERS = {'colmap-cpu': 'COLMAP · 原生 Ceres CPU', 'fastmap': 'FastMap · 兼容模式',
+           'glomap-gpu': 'GLOMap · 旧版本', 'glomap-cpu': 'GLOMap · 旧版本', 'glomap': 'GLOMap · 旧版本'}
 
 
 class DetailValueLabel(QLabel):
@@ -720,7 +721,7 @@ class MainWindow(QMainWindow):
         self.gpu_choice.addItem(f'GPU {self.defaults.gpu_index}（等待检测）', self.defaults.gpu_index)
         self.default_controls['gpu_index'] = self.gpu_choice
         form.addRow('处理显卡', self.gpu_choice)
-        form.addRow(label('选择用于视频 CUDA 解码、特征提取、匹配及 FastMap / GLOMap GPU 求解的 NVIDIA 显卡。保存后用于新建任务，每个任务使用一块显卡。'))
+        form.addRow(label('选择用于视频 CUDA 解码、特征提取、匹配及 FastMap 的 NVIDIA 显卡。COLMAP 2.0 的相机与点云 BA 使用 CPU/Ceres。'))
         self.gpu_choice.currentIndexChanged.connect(self.check_environment)
         self.reuse_failed_projects = QCheckBox('失败任务重试时复用原项目目录')
         self.reuse_failed_projects.setChecked(self.tasks.reuse_failed_projects)
@@ -740,6 +741,14 @@ class MainWindow(QMainWindow):
         form.addRow(label('主界面勾选“完成任务后：关机”或“完成任务后：休眠”后，队列自然完成时执行此动作；停止或异常中断不会执行。'))
         self.environment_info = label('使用随软件提供的独立运行环境。'); form.addRow(self.environment_info)
         form.addRow(button('重新检测运行环境', self.check_environment)); layout.addWidget(group)
+        group, form = settings_form('求解默认项')
+        self.auto_focal_default = QCheckBox('新建任务默认启用自动焦距（分段估计）')
+        self.auto_focal_default.setChecked(self.defaults.auto_focal)
+        self.auto_focal_default.setToolTip('适合变焦或希区柯克变焦素材；关闭时继续使用原来的单一焦距解算。新建任务中仍可单独调整。')
+        self.default_controls['auto_focal'] = self.auto_focal_default
+        form.addRow(self.auto_focal_default)
+        form.addRow(label('开启后让 FastMap 或 COLMAP 原生 Ceres 优化变焦焦距；连续单镜头会加入平滑约束，是否包含切镜在新建任务中选择。原始数据库会保留。'))
+        layout.addWidget(group)
         self.update_panel = UpdatePanel(ROOT, automatic=self.config.get('check_updates_on_startup', True) is not False,
                                        can_install=lambda: not self.busy,
                                        open_url=lambda url: QDesktopServices.openUrl(QUrl(url)))
@@ -769,6 +778,7 @@ class MainWindow(QMainWindow):
         for control in self.default_controls.values():
             if isinstance(control, QLineEdit): control.textChanged.connect(self.mark_settings_dirty)
             elif isinstance(control, QComboBox): control.currentIndexChanged.connect(self.mark_settings_dirty)
+            elif isinstance(control, QCheckBox): control.stateChanged.connect(self.mark_settings_dirty)
         self.reuse_failed_projects.stateChanged.connect(self.mark_settings_dirty)
         self.power_action.currentIndexChanged.connect(self.mark_settings_dirty)
         self.update_panel.automatic.stateChanged.connect(self.mark_settings_dirty)
@@ -935,7 +945,7 @@ class MainWindow(QMainWindow):
             result = job.get('result', {}); record = records_by_model.get(str(Path(result['model']).resolve())) if result.get('model') else None
             if record: seen.add(record['id'])
             options = job['options']; backend = options['backend']
-            if backend == 'glomap': backend = 'glomap-gpu' if options['glomap_gpu'] else 'glomap-cpu'
+            if backend == 'glomap': backend = 'colmap-cpu'
             row = {**job, 'result': result, 'record': record, 'exports': record['exports'] if record else [],
                    'date': job.get('created_at', '') or (record.get('created', '') if record else result.get('completed_at', '')), 'solver': backend,
                    'bytes': record.get('bytes') if record else None, 'queued': True, 'queue_position': positions.get(iid)}
@@ -1500,7 +1510,8 @@ class MainWindow(QMainWindow):
             try:
                 profile = get_hardware(python, force=True, gpu_index=gpu_index)
                 text = describe_hardware(profile)
-                text += ' · GLOMAP GPU ' + ('已构建' if (BINARY_DIRS['01 GLOMAP GPU'] / 'glomap.exe').is_file() else '未构建')
+                colmap_ready = (BINARY_DIRS['01 GLOMAP'] / 'colmap.exe').is_file() or DEV_COLMAP.is_file()
+                text += ' · 原生 COLMAP ' + ('已就绪' if colmap_ready else '待构建')
             except Exception as error:
                 profile = {**system_information(), 'gpu_index': gpu_index, 'error': str(error)}
                 text = '环境检测失败：' + str(error)
@@ -1648,7 +1659,7 @@ class MainWindow(QMainWindow):
                     self.progress_log_at = time.monotonic()
             elif kind == 'solver_warning':
                 job = self.tasks.snapshot().get(iid, {})
-                self.solver_notice_text.setText(f"求解提醒 · {job.get('name', 'GLOMap')}\n{event['text']}")
+                self.solver_notice_text.setText(f"求解提醒 · {job.get('name', 'COLMAP')}\n{event['text']}")
                 self.solver_notice_log = event['log_path']
                 self.solver_notice_text.setToolTip(event['log_path'])
                 self.solver_notice.show()

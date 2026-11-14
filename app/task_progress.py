@@ -23,6 +23,17 @@ GLOMAP_STAGES = [
     ('triangulate', '重新三角化点云'), ('refine', '优化三角化结果'),
     ('final_ba', '最终全局 BA 优化'), ('write', '写入重建模型'),
 ]
+# COLMAP's mapper emits a similar sequence of mapper/BA phases. Keep this
+# separate from the retired GLOMAP label so saved progress and estimates are
+# readable after the solver switch.
+COLMAP_STAGES = [
+    ('read', '读取匹配数据库'), ('preprocess', '准备增量重建'),
+    ('calibration', '初始化相机内参'), ('pose', '注册相机姿态'),
+    ('rotation', '优化相机旋转'), ('tracks', '建立特征轨迹'),
+    ('positioning', '增量求解相机位置'), ('ba', '局部 Bundle Adjustment'),
+    ('triangulate', '三角化点云'), ('refine', '全局 Bundle Adjustment'),
+    ('final_ba', '最终 Bundle Adjustment'), ('write', '写入重建模型'),
+]
 FASTMAP_TIMERS = dict(zip(
     ('Read COLMAP Database', 'Distortion', 'Re-Estimate Matrices', 'Focal Length',
      'Calibrate Matches', 'Relative Pose Decomposition', 'Global Rotation Alignment',
@@ -33,7 +44,7 @@ FASTMAP_TIMERS = dict(zip(
 
 def stage_plan(options, blender=False):
     stages = [('frames', '抽取视频帧'), ('features', '提取图像特征'), ('matching', '匹配相邻图像')]
-    solver = list(FASTMAP_STAGES if options.backend == 'fastmap' else GLOMAP_STAGES)
+    solver = list(FASTMAP_STAGES if options.backend == 'fastmap' else COLMAP_STAGES)
     if options.backend == 'fastmap':
         if options.camera_mode in ('pinhole', 'calibrated'):
             solver = [(key, title) for key, title in solver if key != 'distortion']
@@ -140,7 +151,7 @@ class TaskProgress:
 
     def command(self, label):
         key = {'01-frames': 'frames', '01-frames-cpu': 'frames', '02-features': 'features',
-               '03-matching': 'matching', '04-fastmap': 'read', '04-glomap': 'read',
+               '03-matching': 'matching', '04-fastmap': 'read', '04-glomap': 'read', '04-colmap': 'read',
                '05-export-model': 'export_txt', '05-export-ply': 'export_ply',
                '05-model-analysis': 'analyze', '06-video-sequence': 'sequence'}.get(label)
         if key and key != self.key:
@@ -163,7 +174,7 @@ class TaskProgress:
                            f'{match[1]} / {match[2]} 张图像', int(match[1]), int(match[2]), 'images')
         elif label == '04-fastmap':
             self._fastmap(line)
-        elif label == '04-glomap':
+        elif label in ('04-glomap', '04-colmap'):
             self._glomap(line)
 
     def _fastmap(self, line):

@@ -30,7 +30,7 @@ def progress_event(text):
 
 def export_blender(pipeline, result, output, settings):
     if not model_ready(result):
-        raise ValueError('请先成功生成点云及完整的 COLMAP TXT 模型。')
+        raise ValueError('请先成功生成点云（或仅旋转相机）及完整的 COLMAP TXT 模型。')
     model, output = Path(result['model']), Path(output)
     if output.exists():
         raise ValueError('为保留已有文件，请使用新的 Blender 文件名。')
@@ -46,6 +46,8 @@ def export_blender(pipeline, result, output, settings):
         '--background-images', str(int(settings['background_images'])),
         '--point-radius', str(settings['point_radius'])]
     args += ['--frame-start-offset', str(int(settings.get('frame_start_offset', 0)))]
+    if result.get('rotation_only'):
+        args += ['--allow-empty-points']
     if result.get('images_dir'):
         args += ['--images', result['images_dir']]
     import uuid

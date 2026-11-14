@@ -1,5 +1,6 @@
 from loguru import logger
 import os
+import json
 import torch
 from dataclasses import asdict
 import yaml
@@ -9,7 +10,7 @@ from fastmap.io import read_model, write_model
 from fastmap.timer import timer
 from fastmap.container import ImagePairs, Tracks, PointPairs, Points3D
 from fastmap.database import read_database
-from fastmap.focal import estimate_focals, calibrate_matches
+from fastmap.focal import estimate_focals, calibrate_matches, stabilize_focals
 from fastmap.fundamental import re_estimate_fundamental
 from fastmap.homography import re_estimate_homography
 from fastmap.distortion import estimate_distortion, undistort_matches, alpha_to_k1
@@ -21,6 +22,7 @@ from fastmap.track import build_tracks
 from fastmap.color import TrackColor2DReader
 from fastmap.point_pair import point_pairs_from_tracks
 from fastmap.epipolar import epipolar_adjustment
+from fastmap.low_parallax import analyze_parallax
 from fastmap.sparse import sparse_reconstruction
 from fastmap.memory_policy import current_limit
 from fastmap.debug import (
@@ -42,6 +44,8 @@ def engine(
     calibrated: bool = False,
     image_dir: str | None = None,
     gt_model_path: str | None = None,
+    smooth_focal: bool = False,
+    rotation_only: bool = False,
 ):
     # start timer
     timer.start()
@@ -166,6 +170,12 @@ def engine(
                     num_samples=cfg.focal.num_samples,
                     std=cfg.focal.std,
                 )
+                if smooth_focal:
+                    # A continuous shot cannot reliably estimate 30-frame
+                    # focal segments independently. Stabilize the initial
+                    # values before pose optimization so focal outliers do
+                    # not turn into large camera translations.
+                    stabilize_focals(cameras)
 
     # calibrate matches
     with timer("Calibrate Matches"):
@@ -234,20 +244,6 @@ def engine(
         with timer("Get Point Pairs"):
             point_pairs: PointPairs = point_pairs_from_tracks(tracks=tracks)
 
-    # asynchronously read color for 2D points in tracks
-    if image_dir is not None:
-        with timer("Populate Color Reading Queue"):
-            color_reader = TrackColor2DReader(
-                tracks=tracks,
-                images=images,
-                image_dir=image_dir,
-                use_cpu=True,
-            )
-            color_reader.start()
-        logger.info("Started asynchronous color reader for 2D points")
-    else:
-        color_reader = None
-
     # re-estimate relative translation from tracks and get new image pairs
     with timer("Re-Estimate Relative Translation"):
         (
@@ -262,41 +258,84 @@ def engine(
             ray_angle_thr=cfg.relative_translation.ray_angle_thr,
             min_num_inliers=cfg.relative_translation.min_num_inliers,
             min_degree=cfg.relative_translation.min_degree,
-        )  # ImagePairs, (num_point_pairs,)
+    )  # ImagePairs, (num_point_pairs,)
 
-    # translation alignment
-    with timer("Global Translation Alignment"):
-        t_w2c = global_translation(
-            R_w2c=R_w2c,
-            image_pairs=image_pairs,
-            image_mask=images.mask,
-            num_init=cfg.global_translation.num_init,
-            log_interval=cfg.global_translation.log_interval,
-        )  # (num_images, 3)
-
-    # log debugging info for global translation
-    if gt_model is not None:
-        log_pairwise_translation_angle_error(
-            R_w2c_pred=R_w2c, t_w2c_pred=t_w2c, images=images, gt_model=gt_model
+    # A tiny triangulation-angle distribution is a near-pure-rotation warning:
+    # poses can still be aligned, but metric depth and focal estimation are
+    # weakly constrained. In rotation-only mode keep the camera rotations and
+    # deliberately skip translation/triangulation.
+    parallax = analyze_parallax(
+        point_pairs=point_pairs,
+        point_pair_mask=point_pair_mask,
+        image_pairs=image_pairs,
+        num_images=images.num_images,
+    )
+    logger.info(f"[LOW_PARALLAX] {json.dumps(parallax, ensure_ascii=False)}")
+    if parallax['low']:
+        logger.warning(
+            'Low parallax detected: the sequence is close to pure rotation; '
+            'metric depth and focal length may be unstable.'
         )
+    rotation_mode = bool(rotation_only and parallax['low'])
+    if rotation_mode:
+        logger.warning(
+            '仅旋转模式：已跳过全局平移、极线 BA 和点云三角化；'
+            '输出只包含相机旋转轨迹，无法提供尺度或三维点。'
+        )
+        t_w2c = torch.zeros((images.num_images, 3), device=R_w2c.device, dtype=R_w2c.dtype)
+        focal_scale = torch.ones(cameras.num_cameras, device=cameras.device, dtype=cameras.dtype)
+        color_reader = None
+    else:
+        # Read color only when a point cloud will actually be triangulated.
+        if image_dir is not None:
+            with timer("Populate Color Reading Queue"):
+                color_reader = TrackColor2DReader(
+                    tracks=tracks,
+                    images=images,
+                    image_dir=image_dir,
+                    use_cpu=True,
+                )
+                color_reader.start()
+            logger.info("Started asynchronous color reader for 2D points")
+        else:
+            color_reader = None
 
-    # global epipolar optimization
-    with timer("Global Epipolar Optimization"):
-        R_w2c, t_w2c, focal_scale, point_pair_mask = epipolar_adjustment(
-            R_w2c=R_w2c,
-            t_w2c=t_w2c,
-            point_pairs=point_pairs,
-            point_pair_mask=point_pair_mask,
-            images=images,
-            cameras=cameras,
-            num_irls_steps=cfg.epipolar_adjustment.num_irls_steps,
-            num_prune_steps=cfg.epipolar_adjustment.num_prune_steps,
-            max_thr=cfg.epipolar_adjustment.max_thr,
-            min_thr=cfg.epipolar_adjustment.min_thr,
-            lr=cfg.epipolar_adjustment.lr,
-            lr_decay=cfg.epipolar_adjustment.lr_decay,
-            log_interval=cfg.epipolar_adjustment.log_interval,
-        )  # (num_images, 3), (num_images, 3), (num_cameras,), (num_point_pairs,)
+        # translation alignment
+        with timer("Global Translation Alignment"):
+            t_w2c = global_translation(
+                R_w2c=R_w2c,
+                image_pairs=image_pairs,
+                image_mask=images.mask,
+                num_init=cfg.global_translation.num_init,
+                log_interval=cfg.global_translation.log_interval,
+            )  # (num_images, 3)
+
+        # log debugging info for global translation
+        if gt_model is not None:
+            log_pairwise_translation_angle_error(
+                R_w2c_pred=R_w2c, t_w2c_pred=t_w2c, images=images, gt_model=gt_model
+            )
+
+        # global epipolar optimization
+        with timer("Global Epipolar Optimization"):
+            R_w2c, t_w2c, focal_scale, point_pair_mask = epipolar_adjustment(
+                R_w2c=R_w2c,
+                t_w2c=t_w2c,
+                point_pairs=point_pairs,
+                point_pair_mask=point_pair_mask,
+                images=images,
+                cameras=cameras,
+                num_irls_steps=cfg.epipolar_adjustment.num_irls_steps,
+                num_prune_steps=cfg.epipolar_adjustment.num_prune_steps,
+                max_thr=cfg.epipolar_adjustment.max_thr,
+                min_thr=cfg.epipolar_adjustment.min_thr,
+                lr=cfg.epipolar_adjustment.lr,
+                lr_decay=cfg.epipolar_adjustment.lr_decay,
+                log_interval=cfg.epipolar_adjustment.log_interval,
+                # Second-order focal regularization preserves a steady zoom
+                # while suppressing segment-to-segment oscillation.
+                focal_smooth_weight=0.35 if smooth_focal else 0.0,
+            )  # (num_images, 3), (num_images, 3), (num_cameras,), (num_point_pairs,)
 
     # log debugging info for final poses
     if gt_model is not None:
@@ -318,30 +357,39 @@ def engine(
             gt_model=gt_model,
         )
 
-    # wait for the color reader to finish
-    if color_reader is not None:
-        logger.info("Waiting for color reader to finish...")
-        with timer("Wait for Color Reading"):
-            color2d = color_reader.join()
-        logger.info("Color reader finished")
-    else:
-        color2d = None
-
-    # sparse reconstruction
-    with timer("Sparse Reconstruction"):
-        points3d: Points3D = sparse_reconstruction(
-            tracks=tracks,
-            point_pairs=point_pairs,
-            point_pair_mask=point_pair_mask,
-            cameras=cameras,
-            images=images,
-            R_w2c=R_w2c,
-            t_w2c=t_w2c,
-            color2d=color2d,
-            reproj_err_thr=cfg.sparse_reconstruction.reproj_err_thr,
-            min_ray_angle=cfg.sparse_reconstruction.min_ray_angle,
-            batch_size=min(cfg.sparse_reconstruction.batch_size, current_limit('sparse_batch', device)),
+    if rotation_mode:
+        points3d = Points3D(
+            xyz=torch.empty((0, 3), device=R_w2c.device, dtype=R_w2c.dtype),
+            rgb=torch.empty((0, 3), device=R_w2c.device, dtype=torch.uint8),
+            error=torch.empty((0,), device=R_w2c.device, dtype=R_w2c.dtype),
+            track_image_idx=[],
+            track_keypoint_idx=[],
         )
+    else:
+        # wait for the color reader to finish
+        if color_reader is not None:
+            logger.info("Waiting for color reader to finish...")
+            with timer("Wait for Color Reading"):
+                color2d = color_reader.join()
+            logger.info("Color reader finished")
+        else:
+            color2d = None
+
+        # sparse reconstruction
+        with timer("Sparse Reconstruction"):
+            points3d = sparse_reconstruction(
+                tracks=tracks,
+                point_pairs=point_pairs,
+                point_pair_mask=point_pair_mask,
+                cameras=cameras,
+                images=images,
+                R_w2c=R_w2c,
+                t_w2c=t_w2c,
+                color2d=color2d,
+                reproj_err_thr=cfg.sparse_reconstruction.reproj_err_thr,
+                min_ray_angle=cfg.sparse_reconstruction.min_ray_angle,
+                batch_size=min(cfg.sparse_reconstruction.batch_size, current_limit('sparse_batch', device)),
+            )
 
     # output
     if output_dir is not None:
@@ -355,6 +403,9 @@ def engine(
                 R_w2c=R_w2c,
                 t_w2c=t_w2c,
             )
+            if rotation_mode:
+                with open(os.path.join(output_dir, "rotation-only.json"), "w", encoding="utf-8") as stream:
+                    stream.write('{"low_parallax": true, "points": 0, "translation": false}\n')
 
     # log time
     timer.end()

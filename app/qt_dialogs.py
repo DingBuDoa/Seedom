@@ -131,7 +131,8 @@ class TaskDialog(QDialog):
         form.setSpacing(10)
         self.backend = QComboBox()
         for key, text in SOLVER_CHOICES.items(): self.backend.addItem(text, key)
-        self.backend.setCurrentIndex(0 if options.backend == 'fastmap' else 1)
+        index = self.backend.findData(options.backend)
+        self.backend.setCurrentIndex(index if index >= 0 else 0)
         form.addRow('求解方案', self.backend)
         self.quality = QComboBox()
         for title, values in [('默认 · 沿用当前参数', None), ('高 · SIFT 4096 / 匹配 15', (4096, 15, 'high')),
@@ -232,7 +233,7 @@ class TaskDialog(QDialog):
         self.advanced_toggle = QPushButton('›  高级参数')
         self.advanced_toggle.setCheckable(True)
         layout.addWidget(self.advanced_toggle)
-        advanced = QGroupBox('FastMap / GLOMAP 参数')
+        advanced = QGroupBox('FastMap / COLMAP 参数')
         form = QFormLayout(advanced)
         self.max_size = QSpinBox(); self.max_size.setRange(256, 16384); self.max_size.setValue(options.max_size)
         self.overlap = QSpinBox(); self.overlap.setRange(1, 200); self.overlap.setValue(options.overlap)
@@ -240,9 +241,18 @@ class TaskDialog(QDialog):
         self.camera = QComboBox()
         self.camera.addItem('自动估计畸变（默认）', 'radial'); self.camera.addItem('近似针孔（无畸变）', 'pinhole')
         self.camera.setCurrentIndex(max(0, self.camera.findData(options.camera_mode)))
+        self.auto_focal = QCheckBox('自动焦距（分段估计，适合变焦镜头）')
+        self.auto_focal.setChecked(options.auto_focal)
+        self.auto_focal.setToolTip('关闭时沿用单一焦距；开启后按时间分段建立相机内参，并由 COLMAP Ceres 原生 BA 进行焦距平滑。')
+        self.contains_cuts = QCheckBox('视频包含切镜（检测镜头边界后分别优化）')
+        self.contains_cuts.setChecked(options.contains_cuts)
+        self.contains_cuts.setToolTip('适合一段视频中包含多个独立镜头；开启后会检测明显切镜，并在每个镜头内单独估计焦距。')
+        self.rotation_only = QCheckBox('低视差保护：纯旋转时仅输出相机轨迹')
+        self.rotation_only.setChecked(options.rotation_only)
+        self.rotation_only.setToolTip('检测到近似纯旋转时跳过平移和点云三角化，只输出相机旋转动画并明确提示。')
         self.decode = QCheckBox('CUDA 视频解码（失败时沿用 CPU 解码回退）'); self.decode.setChecked(options.cuda_decode)
         self.color = QCheckBox('FastMap 点云取色'); self.color.setChecked(options.color)
-        self.gpu = QCheckBox('GLOMAP 使用 CUDA / cuDSS 求解'); self.gpu.setChecked(options.glomap_gpu)
+        self.gpu = QCheckBox('COLMAP 原生 Ceres CPU 求解（2.0 默认）'); self.gpu.setChecked(False)
         self.solver_quality = QComboBox()
         for key, profile in SOLVER_PROFILES.items(): self.solver_quality.addItem(profile['title'], key)
         self.solver_quality.setCurrentIndex(self.solver_quality.findData(options.solver_quality))
@@ -250,6 +260,9 @@ class TaskDialog(QDialog):
         form.addRow('FastMap 优化档位', self.solver_quality)
         for name, field in [('SIFT 最大尺寸', self.max_size), ('相邻匹配范围', self.overlap), ('GPU 最少图像', self.gpu_min), ('相机模型', self.camera)]:
             form.addRow(name, field)
+        form.addRow(self.auto_focal)
+        form.addRow(self.contains_cuts)
+        form.addRow(self.rotation_only)
         for field in (self.decode, self.color, self.gpu):
             form.addRow(field)
         layout.addWidget(advanced)
@@ -261,6 +274,8 @@ class TaskDialog(QDialog):
         self.scale.currentIndexChanged.connect(self.update_controls)
         self.backend.currentIndexChanged.connect(self.update_controls)
         self.sequence.toggled.connect(self.update_controls)
+        self.auto_focal.toggled.connect(self.contains_cuts.setEnabled)
+        self.rotation_only.setEnabled(self.backend.currentData() == 'fastmap')
         self.blend.toggled.connect(self.blender_group.setVisible)
         foot = QWidget()
         fl = QVBoxLayout(foot)
@@ -300,6 +315,7 @@ class TaskDialog(QDialog):
         self.source.textChanged.connect(lambda: self.debounce.start())
         self.poller = QTimer(self); self.poller.setInterval(100); self.poller.timeout.connect(self.receive); self.poller.start()
         self.update_controls()
+        self.contains_cuts.setEnabled(self.auto_focal.isChecked())
         inset_numeric_fields(self)
         if self.source.toPlainText():
             self.debounce.start()
@@ -420,7 +436,11 @@ class TaskDialog(QDialog):
         if rate is not None:
             self.custom_rate.setMaximum(min(240, rate))
         self.sequence_size.setEnabled(self.sequence.isChecked())
-        self.gpu.setEnabled(self.backend.currentData() == 'glomap')
+        self.gpu.setEnabled(False)
+        fastmap = self.backend.currentData() == 'fastmap'
+        self.rotation_only.setEnabled(fastmap)
+        if not fastmap and self.rotation_only.isChecked():
+            self.rotation_only.setChecked(False)
         self.color.setEnabled(self.backend.currentData() == 'fastmap')
         self.camera.setEnabled(self.backend.currentData() == 'fastmap')
         self.solver_quality.setEnabled(self.backend.currentData() == 'fastmap')
@@ -453,14 +473,17 @@ class TaskDialog(QDialog):
                 raise ValueError('处理帧率不能超过任一输入视频的原始帧率。')
             if not self.output.text().strip():
                 raise ValueError('请选择输出目录。')
+            if self.rotation_only.isChecked() and self.backend.currentData() != 'fastmap':
+                raise ValueError('低视差仅旋转保护目前只支持 FastMap。')
             options = Options(**{**asdict(self.base), 'backend': self.backend.currentData(),
                 'output_root': str(Path(self.output.text().strip()).resolve()), 'fps': fps,
                 'max_size': self.max_size.value(), 'overlap': self.overlap.value(),
                 'gpu_min_images': self.gpu_min.value(), 'camera_mode': self.camera.currentData(),
                 'cuda_decode': self.decode.isChecked(), 'color': self.color.isChecked(),
-                'glomap_gpu': self.gpu.isChecked(), 'image_scale': self.scale.currentData(),
+                'glomap_gpu': False, 'image_scale': self.scale.currentData(),
                 'export_sequence': self.sequence.isChecked(), 'sequence_original': self.sequence_size.currentData(),
-                'solver_quality': self.solver_quality.currentData()})
+                'solver_quality': self.solver_quality.currentData(), 'auto_focal': self.auto_focal.isChecked(),
+                'contains_cuts': self.contains_cuts.isChecked(), 'rotation_only': self.rotation_only.isChecked()})
             Pipeline(options).preflight()
             blender = None
             if self.blend.isChecked():

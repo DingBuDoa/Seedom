@@ -1,4 +1,4 @@
-"""Desktop front end for the existing COLMAP/GLOMAP and FastMap installations."""
+"""Desktop front end for the native COLMAP and compatible FastMap installations."""
 from pathlib import Path
 from dataclasses import asdict
 from collections import deque
@@ -26,7 +26,7 @@ from blender_settings import ask_blender_settings
 from app_info import APP_NAME
 
 SETTINGS = CONFIG / 'settings.json'
-BACKENDS = {'GLOMAP · 原有方案': 'glomap', 'FastMap · PyTorch CUDA': 'fastmap'}
+BACKENDS = {'COLMAP · 原生 Ceres CPU': 'colmap', 'FastMap · PyTorch CUDA': 'fastmap'}
 LOG_PREVIEW_CHARS = 128 * 1024
 LOG_PREVIEW_CHUNKS = 1024
 
@@ -67,7 +67,10 @@ class App(ProjectManagerMixin, tk.Tk):
             pass
         cfg = self.config_data
         gpu_ready = (BINARY_DIRS['01 GLOMAP GPU'] / 'glomap.exe').is_file()
-        self.backend = tk.StringVar(value=cfg.get('backend_label', 'GLOMAP · 原有方案' if gpu_ready else 'FastMap · PyTorch CUDA'))
+        saved_backend = cfg.get('backend_label', 'COLMAP · 原生 Ceres CPU')
+        if saved_backend not in BACKENDS:
+            saved_backend = 'COLMAP · 原生 Ceres CPU'
+        self.backend = tk.StringVar(value=saved_backend)
         output_path = saved_path(cfg.get('output_root', 'outputs'), cfg.get('distribution_root'))
         python_path = saved_path(cfg.get('python', 'runtime/python/python.exe'), cfg.get('distribution_root'))
         self.output = tk.StringVar(value=str(output_path))
@@ -78,7 +81,7 @@ class App(ProjectManagerMixin, tk.Tk):
         self.gpu_min = tk.StringVar(value=str(cfg.get('gpu_min_images', 50)))
         self.cuda_decode = tk.BooleanVar(value=cfg.get('cuda_decode', True))
         self.color = tk.BooleanVar(value=cfg.get('color', True))
-        self.glomap_gpu = tk.BooleanVar(value=cfg.get('glomap_gpu', True))
+        self.glomap_gpu = tk.BooleanVar(value=False)
         self.camera = tk.StringVar(value=cfg.get('camera_label', '自动估计畸变（默认）'))
         if self.camera.get() not in ('自动估计畸变（默认）', '近似针孔（无畸变）'):
             self.camera.set('自动估计畸变（默认）')
@@ -133,7 +136,7 @@ class App(ProjectManagerMixin, tk.Tk):
             variable.set(str(value))
         self.cuda_decode.set(True)
         self.color.set(True)
-        self.glomap_gpu.set(True)
+        self.glomap_gpu.set(False)
         self.save_settings(self.options())
         self.check_environment()
 
@@ -517,7 +520,7 @@ class App(ProjectManagerMixin, tk.Tk):
             try:
                 profile = get_hardware(python, force=True)
                 text = describe_hardware(profile)
-                text += '  ·  GLOMAP GPU ' + ('已构建' if (BINARY_DIRS['01 GLOMAP GPU'] / 'glomap.exe').is_file() else '待构建')
+                text += '  ·  原生 COLMAP ' + ('已就绪' if (BINARY_DIRS['01 GLOMAP'] / 'colmap.exe').is_file() else '待构建')
             except Exception as error:
                 text = '环境检测：' + str(error)
             self.events.put({'type': 'environment', 'text': text, 'generation': generation})
@@ -592,7 +595,7 @@ def main():
     parser = argparse.ArgumentParser(description=APP_NAME + ' GUI / shared pipeline CLI')
     parser.add_argument('--scene', type=Path)
     parser.add_argument('--video', type=Path)
-    parser.add_argument('--backend', choices=['fastmap', 'glomap'], default='fastmap')
+    parser.add_argument('--backend', choices=['fastmap', 'colmap'], default='colmap')
     parser.add_argument('--cpu-glomap', action='store_true')
     parser.add_argument('--no-color', action='store_true')
     parser.add_argument('--calibrated', action='store_true')
@@ -604,7 +607,7 @@ def main():
     parser.add_argument('--check-ui', action='store_true')
     args = parser.parse_args()
     if args.scene or args.video:
-        options = Options(backend=args.backend, glomap_gpu=not args.cpu_glomap, color=not args.no_color,
+        options = Options(backend=args.backend, glomap_gpu=False, color=not args.no_color,
                           camera_mode='calibrated' if args.calibrated else 'radial', gpu_min_images=args.gpu_min_images,
                           image_scale=args.image_scale, export_sequence=args.export_sequence,
                           sequence_original=args.sequence_original)

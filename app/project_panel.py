@@ -6,7 +6,8 @@ import subprocess
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 
-SOLVERS = {'glomap-gpu':'GLOMAP · GPU', 'glomap-cpu':'GLOMAP · CPU', 'fastmap':'FastMap'}
+SOLVERS = {'colmap-cpu':'COLMAP · 原生 Ceres CPU', 'glomap-gpu':'GLOMap · 旧版本',
+           'glomap-cpu':'GLOMap · 旧版本', 'fastmap':'FastMap · 兼容模式'}
 
 
 def build_project_panel(app):
@@ -113,7 +114,9 @@ class ProjectManagerMixin:
             if query and query not in (record['name']+' '+record['source']+' '+backend).casefold():
                 continue
             metrics = result['metrics']
-            state = 'Blender 已生成' if record['exports'] and record['ready'] else ('点云已完成' if record['ready'] else '文件不完整')
+            state = 'Blender 已生成' if record['exports'] and record['ready'] else (
+                '相机轨迹已完成' if record['ready'] and result.get('rotation_only') else
+                ('点云已完成' if record['ready'] else '文件不完整'))
             self.project_tree.insert('', 'end', iid=key, values=(record['name'],backend,
                 metrics.get('registered_images','—'),f"{metrics.get('points',0):,}",
                 record['completed'].replace('T',' '),state))
@@ -145,9 +148,10 @@ class ProjectManagerMixin:
             blend = record['exports'][0] if record['exports'] else '尚未生成'
             saved = self.project_library.data['export_settings'].get(str(Path(blend).resolve()), {}) if record['exports'] else {}
             version = saved.get('version', '')
+            cloud_text = '仅相机旋转' if result.get('rotation_only') else f"{metrics.get('points',0):,}"
             self.project_details.set(f"素材：{record['source']}\n"
                 f"注册帧：{metrics.get('registered_images','—')} / {result.get('database',{}).get('images','—')}"
-                f"    点云：{metrics.get('points',0):,}    平均误差：{error}    本次耗时：{minutes} 分 {seconds} 秒\n"
+                f"    点云：{cloud_text}    平均误差：{error}    本次耗时：{minutes} 分 {seconds} 秒\n"
                 f"结果：{result['model']}\nBlender：{blend}" + (f"\n生成版本：{version}" if version else ''))
         self.refresh_project_actions()
 

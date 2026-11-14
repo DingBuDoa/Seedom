@@ -490,7 +490,9 @@ def _build_cameras_container(
     )  # (num_images,)
     del unique_dirs, unique_dir_to_id
 
-    # get unique dir_id, focal, cx, cy, is_prior combinations
+    # Keep COLMAP camera IDs distinct even when their initial parameters are
+    # identical.  This is required for segmented-camera jobs: each segment
+    # starts with the same focal prior but must be optimized independently.
     unique_items, camera_idx = torch.unique(
         torch.stack(
             [
@@ -500,12 +502,13 @@ def _build_cameras_container(
                 colmap_cameras_k1[colmap_camera_ids - 1],
                 dir_ids.to(device=device, dtype=dtype),
                 is_prior[colmap_camera_ids - 1].to(device=device, dtype=dtype),
+                colmap_camera_ids.to(device=device, dtype=dtype),
             ],
             dim=-1,
         ),
         return_inverse=True,
         dim=0,
-    )  # (num_cameras, 5), (num_images,) note that here camera_idx is 0-based
+    )  # (num_cameras, 7), (num_images,) note that camera_idx is 0-based
     focal_prior = unique_items[:, 0]  # (num_cameras,)
     focal = focal_prior.clone()  # (num_cameras,)
     cx = unique_items[:, 1]  # (num_cameras,)

@@ -37,13 +37,16 @@ def validate_result(result):
 
 
 def model_ready(result):
-    if result.get('status') != 'complete' or result.get('metrics', {}).get('points', 0) <= 0:
+    rotation_only = bool(result.get('rotation_only'))
+    if result.get('status') != 'complete' or (not rotation_only and result.get('metrics', {}).get('points', 0) <= 0):
         return False
     model = Path(result.get('model', ''))
     try:
         if not all((model / name).is_file() and (model / name).stat().st_size > 0
                    for name in ('cameras.txt', 'images.txt', 'points3D.txt')):
             return False
+        if rotation_only:
+            return True
         with (model / 'points3D.txt').open(encoding='utf-8') as stream:
             return any(line.strip() and not line.lstrip().startswith('#') for line in stream)
     except OSError:

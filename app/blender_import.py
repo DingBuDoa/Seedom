@@ -54,10 +54,11 @@ def intrinsics(camera):
 
 def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
                  background_images=True, point_radius=0.005, draw_points=True,
-                 images_directory=None, report_path=None, frame_start_offset=0):
+                 images_directory=None, report_path=None, frame_start_offset=0,
+                 allow_empty_points=False):
     if type(frame_start_offset) is not int or not 0 <= frame_start_offset <= 10000:
         raise ValueError('导出起始帧偏移需要是 0 到 10000 之间的整数')
-    if not as_mesh and not draw_points:
+    if not allow_empty_points and not as_mesh and not draw_points:
         raise ValueError('Enable colored point display or mesh export')
     progress(2, '正在加载摄影测量导入组件…')
     plugin = enable_bundled_plugin()
@@ -77,33 +78,42 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     if background_images and images_directory is None:
         raise ValueError('Missing images folder for camera background. Disable background images or restore the project images folder.')
     existing_collections = set(bpy.data.collections)
-    # Call the supplied addon's actual COLMAP operator. Its misspelled property
-    # add_points_as_mesh_oject is part of its public RNA interface.
-    progress(10, '正在读取点云及颜色…')
-    imported = bpy.ops.import_scene.colmap_model('EXEC_DEFAULT', directory=str(model) + '/',
-        image_dp=str(images_directory or model), image_fp_type='RELATIVE',
-        use_workspace_images=False, import_cameras=False, add_camera_motion_as_animation=False,
-        add_background_images=False, add_animated_camera_background_images=False,
-        import_points=True, draw_points_with_gpu=False,
-        add_points_to_point_cloud_handle=False, add_points_as_mesh_oject=True,
-        add_mesh_to_point_geometry_nodes=False, point_radius=point_radius,
-        point_subdivisions=1, add_color_as_custom_property=False,
-        center_points=False, point_cloud_display_sparsity=1,
-        suppress_distortion_warnings=suppress_warnings, adjust_clipping_distance=False)
-    if imported != {'FINISHED'}:
-        raise RuntimeError('Photogrammetry Importer did not finish')
-    collection = next((c for c in bpy.data.collections if c not in existing_collections), None)
-    if collection is None:
-        raise RuntimeError('Photogrammetry Importer created no reconstruction')
-    collection.name = scene_name('AutoTracker Reconstruction', '相机与点云重建')
-    cloud = next(obj for obj in collection.all_objects if obj.type == 'MESH')
-    count = len(cloud.data.vertices)
-    if not count:
-        raise ValueError('Model has no points')
-    cloud['point_count'] = count
-    cloud['description'] = 'Imported with bundled Photogrammetry Importer'
-    cloud.name = scene_name('Mesh Point Cloud', '网格点云（Mesh Point Cloud）')
-    progress(25, f'已读取 {count:,} 个点，正在生成相机动画…')
+    cloud = None
+    if allow_empty_points:
+        # Pure rotation has no valid depth. Keep a usable camera track while
+        # avoiding an importer call that expects at least one point.
+        collection = bpy.data.collections.new(scene_name('AutoTracker Reconstruction', '相机旋转轨迹'))
+        scene.collection.children.link(collection)
+        count = 0
+        progress(10, '仅旋转模式：跳过点云，正在生成相机动画…')
+    else:
+        # Call the supplied addon's actual COLMAP operator. Its misspelled
+        # property add_points_as_mesh_oject is part of its public RNA interface.
+        progress(10, '正在读取点云及颜色…')
+        imported = bpy.ops.import_scene.colmap_model('EXEC_DEFAULT', directory=str(model) + '/',
+            image_dp=str(images_directory or model), image_fp_type='RELATIVE',
+            use_workspace_images=False, import_cameras=False, add_camera_motion_as_animation=False,
+            add_background_images=False, add_animated_camera_background_images=False,
+            import_points=True, draw_points_with_gpu=False,
+            add_points_to_point_cloud_handle=False, add_points_as_mesh_oject=True,
+            add_mesh_to_point_geometry_nodes=False, point_radius=point_radius,
+            point_subdivisions=1, add_color_as_custom_property=False,
+            center_points=False, point_cloud_display_sparsity=1,
+            suppress_distortion_warnings=suppress_warnings, adjust_clipping_distance=False)
+        if imported != {'FINISHED'}:
+            raise RuntimeError('Photogrammetry Importer did not finish')
+        collection = next((c for c in bpy.data.collections if c not in existing_collections), None)
+        if collection is None:
+            raise RuntimeError('Photogrammetry Importer created no reconstruction')
+        collection.name = scene_name('AutoTracker Reconstruction', '相机与点云重建')
+        cloud = next(obj for obj in collection.all_objects if obj.type == 'MESH')
+        count = len(cloud.data.vertices)
+        if not count:
+            raise ValueError('Model has no points')
+        cloud['point_count'] = count
+        cloud['description'] = 'Imported with bundled Photogrammetry Importer'
+        cloud.name = scene_name('Mesh Point Cloud', '网格点云（Mesh Point Cloud）')
+        progress(25, f'已读取 {count:,} 个点，正在生成相机动画…')
 
     camera_data = bpy.data.cameras.new(scene_name('Tracked Camera', '跟踪相机'))
     camera = bpy.data.objects.new(camera_data.name, camera_data)
@@ -196,6 +206,7 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     scene['frame_start_offset'] = frame_start_offset
     scene['photogrammetry_importer_version'] = str(plugin.bl_info['version'])
     scene['points_as_mesh'] = as_mesh
+    scene['rotation_only'] = bool(allow_empty_points)
     scene['suppress_distortion_warnings'] = suppress_warnings
     scene['lens_distortion_note'] = 'Camera animation uses ideal pinhole projection; lens distortion is not applied. COLMAP parameters are stored on scene.'
     scene['scale_note'] = 'Monocular SfM has arbitrary global scale and orientation.'
@@ -209,14 +220,15 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     if output.exists():
         raise FileExistsError(output)
     # Build the expensive display graph only after camera keyframes are complete.
-    progress(80, '正在保存两种点云对象、颜色与显示设置…')
-    configure_point_cloud(cloud, point_radius, render_mesh=as_mesh)
-    if draw_points: add_point_handle(cloud, point_radius)
+    progress(80, '正在保存点云对象、颜色与显示设置…' if cloud is not None else '正在保存相机旋转轨迹…')
+    if cloud is not None:
+        configure_point_cloud(cloud, point_radius, render_mesh=as_mesh)
+        if draw_points: add_point_handle(cloud, point_radius)
     configure_lighting(scene)
     if background_images:
         progress(87, '正在配置预览与渲染背景合成…')
         configure_background(scene, background.image, frame_numbers[0], source_frame_duration)
-    scene['native_point_display'] = 1
+    scene['native_point_display'] = int(cloud is not None)
     scene['export_language'] = bpy.context.preferences.view.language
     scene['draw_colored_points'] = draw_points
     progress(92, '正在写入 Blender 工程文件…')
@@ -231,7 +243,7 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
               'frame_start_offset': frame_start_offset, 'source_registered_frames': len(images),
               'render_background': background_images,
               'draw_points': draw_points,
-              'native_point_display': True, 'viewport_shading': 'MATERIAL',
+              'native_point_display': cloud is not None, 'viewport_shading': 'MATERIAL',
               'language': bpy.context.preferences.view.language,
               'importer': 'bundled photogrammetry_importer', 'importer_version': list(plugin.bl_info['version']),
               'blender_version': bpy.app.version_string, 'blender_binary': bpy.app.binary_path}
@@ -253,10 +265,12 @@ if __name__ == '__main__':
     parser.add_argument('--images', type=Path)
     parser.add_argument('--report', type=Path)
     parser.add_argument('--frame-start-offset', type=int, default=0)
+    parser.add_argument('--allow-empty-points', action='store_true')
     arguments = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
     if not 0 < arguments.fps <= 240 or not 0 < arguments.point_radius <= 100:
         raise ValueError('FPS or point radius is outside the allowed range')
     import_model(arguments.model.resolve(), arguments.output.resolve(), arguments.fps,
                  bool(arguments.as_mesh), bool(arguments.suppress_distortion_warnings),
                  bool(arguments.background_images), arguments.point_radius, bool(arguments.draw_points),
-                 arguments.images, arguments.report, arguments.frame_start_offset)
+                 arguments.images, arguments.report, arguments.frame_start_offset,
+                 arguments.allow_empty_points)
