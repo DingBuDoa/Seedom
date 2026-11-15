@@ -1,4 +1,4 @@
-"""Desktop front end for the native COLMAP and compatible FastMap installations."""
+"""Desktop front end for the native COLMAP Global Mapper installation."""
 from pathlib import Path
 from dataclasses import asdict
 from collections import deque
@@ -26,7 +26,7 @@ from blender_settings import ask_blender_settings
 from app_info import APP_NAME
 
 SETTINGS = CONFIG / 'settings.json'
-BACKENDS = {'COLMAP · 原生 Global Mapper': 'colmap', 'FastMap · PyTorch CUDA': 'fastmap'}
+BACKENDS = {'COLMAP · Global Mapper（CUDA/CPU）': 'colmap'}
 LOG_PREVIEW_CHARS = 128 * 1024
 LOG_PREVIEW_CHUNKS = 1024
 
@@ -66,10 +66,9 @@ class App(ProjectManagerMixin, tk.Tk):
         except (OSError, ValueError):
             pass
         cfg = self.config_data
-        gpu_ready = (BINARY_DIRS['01 GLOMAP GPU'] / 'glomap.exe').is_file()
-        saved_backend = cfg.get('backend_label', 'COLMAP · 原生 Global Mapper')
+        saved_backend = cfg.get('backend_label', 'COLMAP · Global Mapper（CUDA/CPU）')
         if saved_backend not in BACKENDS:
-            saved_backend = 'COLMAP · 原生 Global Mapper'
+            saved_backend = 'COLMAP · Global Mapper（CUDA/CPU）'
         self.backend = tk.StringVar(value=saved_backend)
         output_path = saved_path(cfg.get('output_root', 'outputs'), cfg.get('distribution_root'))
         python_path = saved_path(cfg.get('python', 'runtime/python/python.exe'), cfg.get('distribution_root'))
@@ -115,15 +114,9 @@ class App(ProjectManagerMixin, tk.Tk):
         build(self, BACKENDS)
 
     def refresh_note(self):
-        if BACKENDS.get(self.backend.get()) == 'fastmap':
-            text = 'FastMap：PyTorch CUDA；Windows 适配。适合画面清晰、覆盖密集的素材，CPU 仍负责取色和读写。'
-        elif self.glomap_gpu.get():
-            ready = (BINARY_DIRS['01 GLOMAP GPU'] / 'glomap.exe').is_file()
-            text = 'GLOMAP GPU：使用独立 CUDA/cuDSS 版本；运行前验证 GPU 求解器。' if ready else 'GLOMAP GPU 版本尚未构建完成；该选项会提示缺少程序，不会静默改用 CPU。'
-        else:
-            text = '原版 GLOMAP：SIFT 特征与匹配使用 GPU；现有安装包的全局定位和 BA 使用 CPU。'
+        text = 'COLMAP：原生 Global Mapper；按硬件加速开关使用 CUDA 或 CPU，并支持原生动态焦距 BA。'
         self.backend_note.set(text)
-        self.gpu_check.configure(state='normal' if BACKENDS.get(self.backend.get()) == 'glomap' else 'disabled')
+        self.gpu_check.configure(state='disabled')
 
     def reset_defaults(self):
         if self.running:
@@ -595,8 +588,8 @@ def main():
     parser = argparse.ArgumentParser(description=APP_NAME + ' GUI / shared pipeline CLI')
     parser.add_argument('--scene', type=Path)
     parser.add_argument('--video', type=Path)
-    parser.add_argument('--backend', choices=['fastmap', 'colmap'], default='colmap')
-    parser.add_argument('--cpu-glomap', action='store_true')
+    parser.add_argument('--backend', choices=['colmap', 'glomap', 'fastmap'], default='colmap')
+    parser.add_argument('--cpu-glomap', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--no-color', action='store_true')
     parser.add_argument('--calibrated', action='store_true')
     parser.add_argument('--gpu-min-images', type=int, default=50)

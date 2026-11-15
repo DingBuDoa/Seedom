@@ -36,11 +36,11 @@ def settings_signature(options):
         values['contains_cuts'] = True
     if options.rotation_only:
         values['rotation_only'] = True
-    if options.backend == 'fastmap':
+    if options.backend in ('fastmap', 'glomap'):
         values['color'] = options.color
         from solver_quality import OPTIMIZATION_REVISION
         values.update(solver_quality=options.solver_quality, optimization_revision=OPTIMIZATION_REVISION)
-    elif options.glomap_gpu:
+    elif options.use_gpu:
         values['gpu_min_images'] = options.gpu_min_images
     return values
 

@@ -45,10 +45,13 @@ from task_progress import live_remaining
 from system_actions import execute_power_action, power_action_label
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
-SOLVERS = {'colmap-global-cpu': 'COLMAP · 原生 Global Mapper（CPU）',
-           'colmap-global-cuda': 'COLMAP · 原生 Global Mapper（CUDA）',
-           'colmap-cpu': 'COLMAP · 原生 Global Mapper（CPU）', 'fastmap': 'FastMap · 兼容模式',
-           'glomap-gpu': 'GLOMap · 旧版本', 'glomap-cpu': 'GLOMap · 旧版本', 'glomap': 'GLOMap · 旧版本'}
+SOLVERS = {'glomap-gpu': 'COLMAP · Global Mapper（CUDA）',
+           'glomap-cpu': 'COLMAP · Global Mapper（CPU）',
+           'glomap': 'COLMAP · Global Mapper',
+           'colmap-global-cpu': 'COLMAP · Global Mapper（CPU）',
+           'colmap-global-cuda': 'COLMAP · Global Mapper（CUDA）',
+           'colmap-cpu': 'COLMAP · Global Mapper（CPU）',
+           'fastmap': 'COLMAP · Global Mapper（旧任务已迁移）'}
 
 
 class DetailValueLabel(QLabel):
@@ -726,7 +729,7 @@ class MainWindow(QMainWindow):
             form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
             return group, form
         group, form = settings_form('路径与环境')
-        for key, title in [('output_root', '默认输出目录'), ('python', 'FastMap Python')]:
+        for key, title in [('output_root', '默认输出目录')]:
             control = QLineEdit(getattr(self.defaults, key)); self.default_controls[key] = control
             row = QHBoxLayout(); row.addWidget(control, 1); row.addWidget(button('浏览…', lambda checked=False, k=key: self.browse_default(k))); form.addRow(title, row)
         self.gpu_choice = QComboBox()
@@ -875,7 +878,6 @@ class MainWindow(QMainWindow):
         self.update_panel.automatic.blockSignals(True)
         try:
             self.default_controls['output_root'].setText(str(self.defaults.output_root))
-            self.default_controls['python'].setText(str(self.defaults.python))
             index = self.gpu_choice.findData(self.defaults.gpu_index)
             if index >= 0: self.gpu_choice.setCurrentIndex(index)
             self.reuse_failed_projects.setChecked(self.tasks.reuse_failed_projects)
@@ -961,7 +963,7 @@ class MainWindow(QMainWindow):
             result = job.get('result', {}); record = records_by_model.get(str(Path(result['model']).resolve())) if result.get('model') else None
             if record: seen.add(record['id'])
             options = job['options']; backend = options['backend']
-            if backend == 'glomap': backend = 'colmap-cpu'
+            if backend in ('fastmap', 'glomap'): backend = 'colmap-global-cpu'
             row = {**job, 'result': result, 'record': record, 'exports': record['exports'] if record else [],
                    'date': job.get('created_at', '') or (record.get('created', '') if record else result.get('completed_at', '')), 'solver': backend,
                    'bytes': record.get('bytes') if record else None, 'queued': True, 'queue_position': positions.get(iid)}
@@ -1517,7 +1519,9 @@ class MainWindow(QMainWindow):
         threading.Thread(target=work, daemon=True).start()
 
     def check_environment(self):
-        python = self.default_controls['python'].text()
+        # The Python path is bundled and no longer exposed in Settings.
+        # Keep environment detection independent from the removed control.
+        python = str(self.defaults.python)
         gpu_index = self.gpu_choice.currentData()
         self.environment_generation += 1
         generation = self.environment_generation

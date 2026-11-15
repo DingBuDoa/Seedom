@@ -6,10 +6,11 @@ import subprocess
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 
-SOLVERS = {'colmap-global-cpu':'COLMAP · 原生 Global Mapper（CPU）',
-           'colmap-global-cuda':'COLMAP · 原生 Global Mapper（CUDA）',
-           'colmap-cpu':'COLMAP · 原生 Global Mapper（CPU）', 'glomap-gpu':'GLOMap · 旧版本',
-           'glomap-cpu':'GLOMap · 旧版本', 'fastmap':'FastMap · 兼容模式'}
+SOLVERS = {'colmap-global-cpu':'COLMAP · Global Mapper（CPU）',
+           'colmap-global-cuda':'COLMAP · Global Mapper（CUDA）',
+           'colmap-cpu':'COLMAP · Global Mapper（CPU）', 'glomap-gpu':'COLMAP · Global Mapper（旧任务）',
+           'glomap-cpu':'COLMAP · Global Mapper（旧任务）', 'glomap':'COLMAP · Global Mapper（旧任务）',
+           'fastmap':'COLMAP · Global Mapper（旧任务已迁移）'}
 
 
 def build_project_panel(app):

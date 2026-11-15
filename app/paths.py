@@ -6,6 +6,8 @@ ROOT = Path(__file__).resolve().parents[1]
 APP = ROOT / 'app'
 RUNTIME = ROOT / 'runtime'
 FASTMAP = RUNTIME / 'fastmap'
+GLOMAP = RUNTIME / 'glomap-cpu'
+GLOMAP_GPU = RUNTIME / 'glomap-gpu'
 CONFIG = ROOT / 'config'
 LOGS = ROOT / 'logs'
 OUTPUTS = ROOT / 'output'
@@ -18,7 +20,11 @@ FFMPEG = RUNTIME / 'ffmpeg'
 if not FFMPEG.is_dir() and DEV_FFMPEG.is_dir():
     FFMPEG = DEV_FFMPEG
 BINARY_DIRS = {'01 GLOMAP': RUNTIME / 'colmap',
-               '01 GLOMAP GPU': RUNTIME / 'glomap-gpu',
+               # The name is retained for old settings, but points to the
+               # native CUDA COLMAP bundle rather than the archived GLOMAP.
+               '01 GLOMAP GPU': RUNTIME / 'colmap-cuda',
+               '02 GLOMAP': GLOMAP,
+               '02 GLOMAP GPU': GLOMAP_GPU,
                '03 FFMPEG': FFMPEG}
 # The source checkout reuses the archived Qt/Python runtime until the 2.0
 # runtime bundle is assembled. A packaged runtime still takes precedence.
@@ -32,6 +38,10 @@ DEV_COLMAP = ROOT.parent / 'solvers' / 'colmap' / 'build-native' / 'src' / 'colm
 DEV_COLMAP_CUDA = ROOT.parent / 'solvers' / 'colmap' / 'build-cuda' / 'src' / 'colmap' / 'exe' / 'colmap.exe'
 RUNTIME_COLMAP = RUNTIME / 'colmap' / 'colmap.exe'
 RUNTIME_COLMAP_CUDA = RUNTIME / 'colmap-cuda' / 'colmap.exe'
+RUNTIME_GLOMAP = GLOMAP / 'glomap.exe'
+RUNTIME_GLOMAP_CUDA = GLOMAP_GPU / 'glomap.exe'
+DEV_GLOMAP = ROOT.parent.parent / 'archive' / 'legacy-1.x' / 'runtime' / 'colmap' / 'glomap.exe'
+DEV_GLOMAP_CUDA = ROOT.parent.parent / 'archive' / 'legacy-1.x' / 'runtime' / 'glomap-gpu' / 'glomap.exe'
 
 
 def use_dev_cuda_colmap():

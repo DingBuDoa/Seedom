@@ -43,16 +43,7 @@ FASTMAP_TIMERS = dict(zip(
 
 def stage_plan(options, blender=False):
     stages = [('frames', '抽取视频帧'), ('features', '提取图像特征'), ('matching', '匹配相邻图像')]
-    solver = list(FASTMAP_STAGES if options.backend == 'fastmap' else COLMAP_STAGES)
-    if options.backend == 'fastmap':
-        if options.camera_mode in ('pinhole', 'calibrated'):
-            solver = [(key, title) for key, title in solver if key != 'distortion']
-        if options.camera_mode == 'pinhole':
-            solver = [(key, title) for key, title in solver if key != 'matrices']
-        if options.camera_mode == 'calibrated':
-            solver = [(key, title) for key, title in solver if key != 'focal']
-        if not options.color:
-            solver = [(key, title) for key, title in solver if key != 'color']
+    solver = list(GLOMAP_STAGES if options.backend == 'glomap' else COLMAP_STAGES)
     stages += solver + [('export_txt', '导出相机与点云模型'), ('export_ply', '导出 PLY 点云'),
                         ('analyze', '检查重建结果')]
     if options.export_sequence:

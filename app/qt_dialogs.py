@@ -473,7 +473,7 @@ class TaskDialog(QDialog):
         acceleration_row = QHBoxLayout()
         self.acceleration = QCheckBox('启用 GPU 硬件加速')
         self.acceleration.setChecked(bool(options.use_gpu))
-        self.acceleration.setToolTip('关闭后使用 CPU 完成特征、匹配和全局求解；FastMap 需要 GPU。')
+        self.acceleration.setToolTip('关闭后使用 CPU 完成特征、匹配和全局求解；开启后按所选显卡运行。')
         acceleration_row.addWidget(self.acceleration)
         self.gpu_choice = NoWheelComboBox()
         self.gpu_choice.setMinimumWidth(210)
@@ -591,15 +591,15 @@ class TaskDialog(QDialog):
         self.rotation_only.setChecked(options.rotation_only)
         self.rotation_only.setToolTip('检测到近似纯旋转时跳过平移和点云三角化，只输出相机旋转动画并明确提示。')
         self.decode = QCheckBox('CUDA 视频解码（失败时沿用 CPU 解码回退）'); self.decode.setChecked(options.cuda_decode)
-        self.color = QCheckBox('FastMap 点云取色'); self.color.setChecked(options.color)
+        self.color = QCheckBox('点云取色'); self.color.setChecked(options.color)
         self.solver_quality = NoWheelComboBox()
         for key, profile in SOLVER_PROFILES.items(): self.solver_quality.addItem(profile['title'], key)
         self.solver_quality.setCurrentIndex(self.solver_quality.findData(options.solver_quality))
         self.solver_quality.currentIndexChanged.connect(lambda: self.quality_note.setText(quality_note(self.solver_quality.currentData())))
-        form.addRow('FastMap 优化档位', self.solver_quality)
+        form.addRow('求解优化档位', self.solver_quality)
         for name, field in [('SIFT 最大尺寸', self.max_size), ('相邻匹配范围', self.overlap), ('GPU 最少图像', self.gpu_min), ('相机模型', self.camera)]:
             form.addRow(name, field)
-        form.addRow(self.rotation_only)
+        self.rotation_only.hide()
         for field in (self.decode, self.color):
             form.addRow(field)
         layout.addWidget(advanced)
@@ -614,7 +614,7 @@ class TaskDialog(QDialog):
         self.input_mode.currentIndexChanged.connect(lambda: self.debounce.start())
         self.acceleration.toggled.connect(self.update_controls)
         self.sequence.toggled.connect(self.update_controls)
-        self.rotation_only.setEnabled(self.backend.currentData() == 'fastmap')
+        self.rotation_only.setEnabled(False)
         self.blend.toggled.connect(self.blender_group.setVisible)
         foot = QWidget()
         foot.setObjectName('taskFooter')
@@ -879,13 +879,16 @@ class TaskDialog(QDialog):
         self.gpu_choice.setEnabled(self.acceleration.isChecked())
         self.decode.setEnabled(self.acceleration.isChecked() and not sequence_input)
         self.preview_acceleration.setText('GPU 硬件加速：已启用' if self.acceleration.isChecked() else 'GPU 硬件加速：已关闭，使用 CPU')
-        fastmap = self.backend.currentData() == 'fastmap'
-        self.rotation_only.setEnabled(fastmap)
-        if not fastmap and self.rotation_only.isChecked():
+        # New tasks use the merged native COLMAP Global Mapper.  The old
+        # backend aliases are migrated by Options.validate() and are not
+        # exposed in this dialog.
+        colmap = self.backend.currentData() == 'colmap'
+        self.rotation_only.setEnabled(False)
+        if self.rotation_only.isChecked():
             self.rotation_only.setChecked(False)
-        self.color.setEnabled(self.backend.currentData() == 'fastmap')
-        self.camera.setEnabled(self.backend.currentData() == 'fastmap')
-        self.solver_quality.setEnabled(self.backend.currentData() == 'fastmap')
+        self.color.setEnabled(colmap)
+        self.camera.setEnabled(colmap)
+        self.solver_quality.setEnabled(colmap)
         self.input_mode.setToolTip('图像序列会直接读取文件夹中的图片，跳过 FFmpeg 拆分。' if sequence_input else '视频输入会先由 FFmpeg 抽取为序列帧。')
         if len(self.metadata) == 1:
             info = next(iter(self.metadata.values()))
@@ -925,8 +928,6 @@ class TaskDialog(QDialog):
                 raise ValueError('处理帧率不能超过任一输入视频的原始帧率。')
             if not self.output.text().strip():
                 raise ValueError('请选择输出目录。')
-            if self.rotation_only.isChecked() and self.backend.currentData() != 'fastmap':
-                raise ValueError('低视差仅旋转保护目前只支持 FastMap。')
             selected_gpu = self.gpu_choice.currentData()
             options = Options(**{**asdict(self.base), 'backend': self.backend.currentData(),
                 'output_root': str(Path(self.output.text().strip()).resolve()),
