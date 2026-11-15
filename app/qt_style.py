@@ -1,9 +1,11 @@
 """Shared, restrained Qt styling and small vector icons."""
-from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap, QColor
+from PySide6.QtCore import QByteArray, Qt, QObject, QEvent
+from PySide6.QtGui import QIcon, QPainter, QPixmap, QColor, QPalette
 from PySide6.QtSvg import QSvgRenderer
 from pathlib import Path
-from PySide6.QtWidgets import QAbstractSpinBox
+from PySide6.QtWidgets import QAbstractSpinBox, QApplication, QWidget
+import ctypes
+import sys
 
 
 def inset_numeric_fields(parent):
@@ -15,11 +17,32 @@ def inset_numeric_fields(parent):
 LIGHT_STYLE = '''
 QWidget { color: #1c1f26; font-family: "Microsoft YaHei UI"; font-size: 13px; }
 QMainWindow, QWidget#workspace { background: #f4f5f7; }
+QDialog#taskDialog { background: white; }
+QWidget#taskBody { background: white; }
+QWidget#taskFooter { background: white; border-top: 1px solid #e3e5e9; }
+QScrollArea#taskFormScroll { background: white; }
 QWidget#sidebar { background: #fbfbfc; border-right: 1px solid #e3e5e9; }
 QWidget#header, QWidget#detail, QDialog { background: white; }
 QWidget#detailSummary { background: transparent; }
 QWidget#recentLogsPanel { background: transparent; }
 QWidget#detailField { background: transparent; }
+QWidget#taskPreview { background: white; border-left: 1px solid #e3e5e9; }
+QLabel#taskPreviewCanvas { background: #1b1e24; color: #aeb8c7; border-radius: 8px; padding: 18px; }
+QFrame#sourceInput { background: #fafbfc; border: 1px solid #e3e7ee; border-radius: 6px; }
+QLabel#sourcePath { color: #697382; padding: 8px 10px; }
+QLabel#sourcePath[empty="true"] { color: #98a0ac; }
+QWidget#previewStage { background: #1b1e24; border-radius: 8px; }
+QWidget#previewOverlay { background: transparent; }
+QLabel#previewMessage { background: transparent; color: #aeb8c7; font-size: 12px; }
+QPushButton#previewPlay { background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.65); border-radius: 27px; color: white; font-size: 22px; padding-left: 3px; }
+QPushButton#previewPlay:hover { background: rgba(255,255,255,0.30); }
+QLabel#taskAcceleration { background: #eaf0ff; color: #315fc5; border-radius: 6px; padding: 9px 10px; }
+QFrame#dropZone { background: #fbfcfe; border: 1px dashed #cbd4e2; border-radius: 7px; }
+QLabel#dropIcon { background: #eaf0ff; color: #2f6bff; border-radius: 6px; font-size: 24px; font-weight: 600; }
+QLabel#dropTitle { color: #263143; font-weight: 600; }
+QLabel#dropNote { color: #8b939f; font-size: 11px; }
+QPushButton#dropAction { background: white; border: 1px solid #cbd4e2; border-radius: 6px; padding: 7px 11px; min-width: 88px; }
+QPushButton#dropAction:hover { background: #f0f5ff; border-color: #2f6bff; }
 QWidget#header { border-bottom: 1px solid #e3e5e9; }
 QLabel { background: transparent; border: none; }
 QLabel#title { font-size: 20px; font-weight: 600; }
@@ -47,6 +70,11 @@ QPushButton#startQueue { background: #15845d; border-color: #15845d; color: whit
 QPushButton#startQueue:hover { background: #116c4b; }
 QPushButton#startQueue:disabled { background: #a8c9bc; border-color: #a8c9bc; color: #f5f7ff; }
 QPushButton#primary:disabled { background: #aebfe9; border-color: #aebfe9; color: #f5f7ff; }
+QPushButton#qualitySegment { background: #eef0f4; border: 0; border-radius: 0; color: #626a76; min-height: 28px; padding: 4px 10px; }
+QPushButton#qualitySegment:first { border-top-left-radius: 6px; border-bottom-left-radius: 6px; }
+QPushButton#qualitySegment:last { border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+QPushButton#qualitySegment:checked { background: white; border: 2px solid #1c1f26; color: #1c1f26; font-weight: 600; }
+QPushButton#qualitySegment:disabled { color: #a5adb9; background: #f5f6f8; }
 QPushButton#danger { color: #d8443c; }
 QPushButton#iconButton { padding: 0; }
 QComboBox#sortBox { padding-left: 12px; padding-right: 36px; }
@@ -54,8 +82,10 @@ QComboBox#sortBox::drop-down { subcontrol-origin: border; subcontrol-position: t
 QPushButton#nav { border: 1px solid transparent; background: transparent; text-align: left; padding: 10px 14px; color: #626a76; }
 QPushButton#nav:hover { background: #eff0f3; }
 QPushButton#nav:checked { background: white; border-color: #e3e5e9; color: #1c1f26; font-weight: 600; }
-QPushButton#segment { background: transparent; border: 0; color: #737c89; border-radius: 4px; padding: 0 12px; min-height: 0; }
-QPushButton#segment:checked { background: white; color: #2f6bff; }
+QPushButton#segment { background: #f4f6f9; border: 1px solid transparent; color: #737c89; border-radius: 4px; padding: 6px 12px; min-height: 24px; }
+QPushButton#segment:hover { background: #eaf0ff; color: #315fc5; }
+QPushButton#segment:checked { background: white; border-color: #c9d8ff; color: #2f6bff; font-weight: 600; }
+QPushButton#segment:disabled { color: #a5adb9; background: #f7f8fa; }
 QWidget#segments { background: #ebedf1; border-radius: 6px; }
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: white; border: 1px solid #d3d6dc; border-radius: 5px; padding: 7px 9px; selection-background-color: #dce6ff; selection-color: #1c1f26; }
 QLineEdit QToolButton { background: transparent; border: none; padding: 0; min-height: 0; }
@@ -77,6 +107,8 @@ QHeaderView::section { background: #fafbfc; color: #89929f; font-size: 12px; fon
 QHeaderView { background: #fafbfc; }
 QGroupBox { background: white; border: 1px solid #e3e5e9; border-radius: 6px; margin-top: 12px; padding: 16px; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; font-weight: 600; }
+QFrame#taskSection { background: #ffffff; border: 1px solid #edf0f4; border-radius: 8px; }
+QLabel#taskSectionTitle { color: #263143; font-size: 13px; font-weight: 600; }
 QCheckBox { spacing: 8px; padding: 5px 0; }
 QCheckBox::indicator { width: 14px; height: 14px; }
 QProgressBar { border: 0; border-radius: 2px; background: #e6e9ef; max-height: 4px; text-align: center; }
@@ -125,7 +157,7 @@ _DARK_COLORS = {
     '#fff4df': '#4a3920', '#94600b': '#f0c36d', '#fdeceb': '#4b292d',
     '#b43c35': '#ff9b91', '#697382': '#aeb8c7', '#8b939f': '#9aa6b6',
     '#fff8e6': '#443a20', '#f0dca8': '#6d5d31', '#836314': '#f2d27a',
-    '#d3d6dc': '#46505e', '#f5f6f8': '#2b323d', '#bdc3ce': '#5c6878',
+    '#d3d6dc': '#46505e', '#e3e7ee': '#3d4654', '#f5f6f8': '#2b323d', '#bdc3ce': '#5c6878',
     '#eef0f4': '#303845', '#b4bac4': '#788394', '#e5e8ed': '#3c4552',
     '#2f6bff': '#78a7ff', '#2559db': '#5c8df0', '#15845d': '#28a879',
     '#116c4b': '#19865c', '#a8c9bc': '#487966', '#f5f7ff': '#f3f6fc',
@@ -133,6 +165,8 @@ _DARK_COLORS = {
     '#737c89': '#a0aaba', '#ebedf1': '#2a313c', '#dce6ff': '#304b78',
     '#4d5868': '#b5bfce', '#f0f1f4': '#303743', '#eef0f3': '#303743',
     '#f0f5ff': '#202f4a', '#dce7ff': '#3c5275', '#7a8391': '#aeb8c6',
+    '#f7f8fa': '#20252d', '#1b1e24': '#15181e', '#fbfcfe': '#20252d',
+    '#cbd4e2': '#46505e', '#263143': '#dce3ec',
     '#303744': '#d7dee9', '#98a0ac': '#9ca8b8', '#a5adb9': '#7b8798',
     '#ced3dc': '#566272', '#e6e9ef': '#343d4a', '#eff0f3': '#2a313c',
     '#c7ccd5': '#657183', '#16865f': '#38c58d', '#eaf7f1': '#1d4739',
@@ -173,6 +207,81 @@ def style_for_theme(theme):
         style = style.replace(source, target)
     style = style.replace('white', '#252b35')
     return style + _style_suffix()
+
+
+def _native_color(color):
+    """Convert #RRGGBB to the COLORREF value expected by DWM."""
+    value = QColor(color)
+    return value.red() | (value.green() << 8) | (value.blue() << 16)
+
+
+def apply_native_titlebar_theme(window, theme):
+    """Keep Windows' non-client title bar in sync with the Qt theme.
+
+    Qt stylesheets do not paint the native title bar. Without this small DWM
+    bridge, a manually selected dark theme leaves dialogs with a white title
+    bar whenever Windows itself is in light mode.
+    """
+    if sys.platform != 'win32' or not isinstance(window, QWidget):
+        return
+    try:
+        hwnd = int(window.winId())
+        dwm = ctypes.windll.dwmapi
+        dark = ctypes.c_int(1 if theme == 'dark' else 0)
+        # 20 is Windows 11; 19 is the Windows 10 compatibility attribute.
+        for attribute in (20, 19):
+            dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(dark), ctypes.sizeof(dark))
+        caption = _native_color('#252b35' if theme == 'dark' else '#ffffff')
+        text = _native_color('#edf1f7' if theme == 'dark' else '#1c1f26')
+        for attribute, value in ((35, caption), (36, text)):
+            color = ctypes.c_int(value)
+            dwm.DwmSetWindowAttribute(hwnd, attribute, ctypes.byref(color), ctypes.sizeof(color))
+    except (AttributeError, OSError, TypeError, ValueError):
+        # Older Windows versions may not expose the optional DWM attributes.
+        pass
+
+
+class _NativeThemeFilter(QObject):
+    def __init__(self, app):
+        super().__init__(app)
+        self.theme = 'light'
+        app.installEventFilter(self)
+
+    def eventFilter(self, watched, event):
+        if event.type() == QEvent.Type.Show and isinstance(watched, QWidget) and watched.isWindow():
+            apply_native_titlebar_theme(watched, self.theme)
+        return False
+
+
+def apply_palette_and_titlebars(app, theme):
+    """Apply the palette fallback and native title-bar colors globally."""
+    if not hasattr(app, '_seedom_light_palette'):
+        app._seedom_light_palette = app.palette()
+        app._seedom_native_theme_filter = _NativeThemeFilter(app)
+    if theme == 'dark':
+        palette = QPalette(app._seedom_light_palette)
+        colors = {
+            QPalette.ColorRole.Window: '#252b35',
+            QPalette.ColorRole.Base: '#252b35',
+            QPalette.ColorRole.AlternateBase: '#202630',
+            QPalette.ColorRole.Text: '#edf1f7',
+            QPalette.ColorRole.WindowText: '#edf1f7',
+            QPalette.ColorRole.Button: '#252b35',
+            QPalette.ColorRole.ButtonText: '#edf1f7',
+            QPalette.ColorRole.ToolTipBase: '#1c1f26',
+            QPalette.ColorRole.ToolTipText: '#ffffff',
+            QPalette.ColorRole.Highlight: '#304b78',
+            QPalette.ColorRole.HighlightedText: '#edf1f7',
+            QPalette.ColorRole.PlaceholderText: '#7b8798',
+        }
+        for role, color in colors.items():
+            palette.setColor(role, QColor(color))
+        app.setPalette(palette)
+    else:
+        app.setPalette(QPalette(app._seedom_light_palette))
+    app._seedom_native_theme_filter.theme = theme
+    for window in app.topLevelWidgets():
+        apply_native_titlebar_theme(window, theme)
 
 
 def detect_system_theme(app):

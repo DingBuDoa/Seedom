@@ -23,16 +23,15 @@ GLOMAP_STAGES = [
     ('triangulate', '重新三角化点云'), ('refine', '优化三角化结果'),
     ('final_ba', '最终全局 BA 优化'), ('write', '写入重建模型'),
 ]
-# COLMAP's mapper emits a similar sequence of mapper/BA phases. Keep this
-# separate from the retired GLOMAP label so saved progress and estimates are
-# readable after the solver switch.
+# COLMAP's native Global Mapper follows the same global stages as GLOMAP. Keep
+# its labels separate so saved progress and estimates remain readable.
 COLMAP_STAGES = [
-    ('read', '读取匹配数据库'), ('preprocess', '准备增量重建'),
-    ('calibration', '初始化相机内参'), ('pose', '注册相机姿态'),
-    ('rotation', '优化相机旋转'), ('tracks', '建立特征轨迹'),
-    ('positioning', '增量求解相机位置'), ('ba', '局部 Bundle Adjustment'),
-    ('triangulate', '三角化点云'), ('refine', '全局 Bundle Adjustment'),
-    ('final_ba', '最终 Bundle Adjustment'), ('write', '写入重建模型'),
+    ('read', '读取匹配数据库'), ('preprocess', '加载图像与匹配'),
+    ('calibration', '视图图标定'), ('pose', '估计相对相机姿态'),
+    ('rotation', '全局旋转平均'), ('tracks', '建立特征轨迹'),
+    ('positioning', '全局位置求解'), ('ba', '第一轮全局 Bundle Adjustment'),
+    ('triangulate', '三角化点云'), ('refine', '优化三角化结果'),
+    ('final_ba', '最终全局 Bundle Adjustment'), ('write', '写入重建模型'),
 ]
 FASTMAP_TIMERS = dict(zip(
     ('Read COLMAP Database', 'Distortion', 'Re-Estimate Matrices', 'Focal Length',
@@ -87,6 +86,10 @@ class TaskProgress:
         self.phase_estimates = {}
         self.frames = None
         self.ba_round = 0
+        self.colmap_total_images = None
+        self.colmap_registered_images = 0
+        self.colmap_ba_round = 0
+        self.colmap_waiting_frame_count = False
         self.rate_kind = None
         self.counter_started = self.started
         self.sampled_at = self.started
@@ -174,7 +177,9 @@ class TaskProgress:
                            f'{match[1]} / {match[2]} 张图像', int(match[1]), int(match[2]), 'images')
         elif label == '04-fastmap':
             self._fastmap(line)
-        elif label in ('04-glomap', '04-colmap'):
+        elif label == '04-colmap':
+            self._colmap(line)
+        elif label == '04-glomap':
             self._glomap(line)
 
     def _fastmap(self, line):
@@ -263,6 +268,62 @@ class TaskProgress:
             match = re.search(r'Iterations:\s*(\d+).*Termination:\s*(\w+)', line)
             if match:
                 self.begin(self.key, f'本次优化 {match[1]} 次迭代 · {match[2]}', force=True)
+        if 'Reconstruction done in' in line:
+            self.begin('write', '保存相机、轨迹与点云')
+
+    def _colmap(self, line):
+        """Translate native COLMAP Global Mapper output into live progress."""
+        if 'Loading database' in line:
+            self.begin('read', '读取匹配数据库')
+        # The database cache reports the total frame count before registration.
+        if 'database_cache.cc:' in line and 'Loading frames' in line:
+            self.begin('preprocess', '加载视频帧与相机信息')
+            self.colmap_waiting_frame_count = True
+        frame_count = re.search(r'database_cache\.cc:\d+\].*?\s(\d+)\s+in\s', line)
+        if frame_count and self.colmap_waiting_frame_count and self.colmap_total_images is None:
+            self.colmap_total_images = int(frame_count[1])
+            self.colmap_waiting_frame_count = False
+        running = re.search(r'Running\s+(.+?)\s*\.\.\.', line)
+        if running:
+            name = running[1].strip().casefold()
+            stages = {
+                'rotation averaging': ('rotation', '全局旋转平均'),
+                'track establishment': ('tracks', '建立特征轨迹'),
+                'global positioning': ('positioning', '全局位置求解'),
+                'bundle adjustment': ('ba', '全局 Bundle Adjustment'),
+            }
+            stage = stages.get(name)
+            if stage:
+                if stage[0] == 'ba':
+                    self.colmap_ba_round += 1
+                    key = 'ba' if self.colmap_ba_round == 1 else 'final_ba'
+                    self.begin(key, f'第 {self.colmap_ba_round} 次全局 Bundle Adjustment')
+                else:
+                    self.begin(*stage)
+        if 'Finding good initial image pair' in line:
+            self.begin('calibration', '寻找初始相机对')
+        if 'Registering initial image pair' in line:
+            self.begin('pose', '初始化相机姿态')
+        if 'Triangulating image' in line:
+            triangulated = re.search(r'Triangulating image\s+(\d+)\s*/\s*(\d+)', line)
+            if triangulated:
+                self.begin('triangulate', f'{triangulated[1]} / {triangulated[2]} 张图像',
+                           int(triangulated[1]), int(triangulated[2]), 'images')
+        registered = re.search(r'Registering image #\d+\s+\(num_reg_frames=(\d+)\)', line)
+        if registered:
+            current = int(registered[1])
+            self.colmap_registered_images = max(self.colmap_registered_images, current)
+            total = self.colmap_total_images
+            if total and total > 0:
+                self.begin('positioning', f'已注册 {current} / {total} 帧', current, total, 'images')
+            else:
+                self.begin('positioning', f'已注册 {current} 帧')
+        if 'Global bundle adjustment' in line:
+            self.colmap_ba_round += 1
+            key = 'ba' if self.colmap_ba_round == 1 else 'refine'
+            self.begin(key, f'第 {self.colmap_ba_round} 次全局 Bundle Adjustment')
+        if 'Writing reconstruction' in line or 'Reconstruction finished' in line:
+            self.begin('write', '保存相机、轨迹与点云')
         if 'Reconstruction done in' in line:
             self.begin('write', '保存相机、轨迹与点云')
 

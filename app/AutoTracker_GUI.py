@@ -26,7 +26,7 @@ from blender_settings import ask_blender_settings
 from app_info import APP_NAME
 
 SETTINGS = CONFIG / 'settings.json'
-BACKENDS = {'COLMAP · 原生 Ceres CPU': 'colmap', 'FastMap · PyTorch CUDA': 'fastmap'}
+BACKENDS = {'COLMAP · 原生 Global Mapper': 'colmap', 'FastMap · PyTorch CUDA': 'fastmap'}
 LOG_PREVIEW_CHARS = 128 * 1024
 LOG_PREVIEW_CHUNKS = 1024
 
@@ -67,9 +67,9 @@ class App(ProjectManagerMixin, tk.Tk):
             pass
         cfg = self.config_data
         gpu_ready = (BINARY_DIRS['01 GLOMAP GPU'] / 'glomap.exe').is_file()
-        saved_backend = cfg.get('backend_label', 'COLMAP · 原生 Ceres CPU')
+        saved_backend = cfg.get('backend_label', 'COLMAP · 原生 Global Mapper')
         if saved_backend not in BACKENDS:
-            saved_backend = 'COLMAP · 原生 Ceres CPU'
+            saved_backend = 'COLMAP · 原生 Global Mapper'
         self.backend = tk.StringVar(value=saved_backend)
         output_path = saved_path(cfg.get('output_root', 'outputs'), cfg.get('distribution_root'))
         python_path = saved_path(cfg.get('python', 'runtime/python/python.exe'), cfg.get('distribution_root'))

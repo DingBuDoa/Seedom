@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 
-from paths import APP, runtime_environment
+from paths import APP, PYTHON, runtime_environment
 
 _cache = {}
 _lock = threading.Lock()
@@ -21,20 +21,19 @@ def digest(value):
 
 
 def settings_signature(options):
-    keys = ('fps', 'max_size', 'overlap', 'cuda_decode', 'camera_mode')
+    keys = ('fps', 'max_size', 'overlap', 'cuda_decode', 'camera_mode', 'use_gpu', 'input_type')
     values = {key: getattr(options, key) for key in keys}
     values['policy_version'] = POLICY_VERSION
-    if options.gpu_index:
+    if options.use_gpu and options.gpu_index:
         values['gpu_index'] = options.gpu_index
     if options.image_scale != 1:
         values['image_scale'] = options.image_scale
     if options.export_sequence:
         values['export_sequence'] = True
         values['sequence_original'] = options.sequence_original
-    if options.auto_focal:
+    if getattr(options, 'smart_lens', options.auto_focal or options.contains_cuts):
         values['auto_focal'] = True
-        if options.contains_cuts:
-            values['contains_cuts'] = True
+        values['contains_cuts'] = True
     if options.rotation_only:
         values['rotation_only'] = True
     if options.backend == 'fastmap':
@@ -115,7 +114,10 @@ def probe_local(gpu_index=0):
 
 
 def get_hardware(python, force=False, gpu_index=0):
-    path = str(Path(python).resolve())
+    candidate = Path(python)
+    if not candidate.is_file() and PYTHON.is_file():
+        candidate = PYTHON
+    path = str(candidate.resolve())
     cache_key = (path, gpu_index)
     with _lock:
         cached = _cache.get(cache_key)
@@ -124,7 +126,18 @@ def get_hardware(python, force=False, gpu_index=0):
         environment = os.environ.copy()
         environment.update(runtime_environment())
         try:
-            result = subprocess.run([path, '-X', 'utf8', str(APP / 'hardware.py'), '--probe', '--gpu-index', str(gpu_index)],
+            # The bundled/embedded Python runtime keeps its own fixed module
+            # path and does not add the directory of a script passed by path.
+            # Inject the current app directory explicitly before running the
+            # probe, otherwise imports such as ``from paths import ...`` fail
+            # and the UI reports that no GPU was detected.
+            probe_path = str(APP / 'hardware.py')
+            probe_code = (
+                f"import runpy,sys; sys.path.insert(0, {str(APP)!r}); "
+                f"sys.argv=['hardware.py','--probe','--gpu-index',{str(gpu_index)!r}]; "
+                f"runpy.run_path({probe_path!r}, run_name='__main__')"
+            )
+            result = subprocess.run([path, '-X', 'utf8', '-c', probe_code],
                                     env=environment, capture_output=True, text=True, encoding='utf-8',
                                     errors='replace', timeout=45,
                                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)

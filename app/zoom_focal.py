@@ -1,10 +1,10 @@
-"""Prepare a safe, segmented-camera COLMAP database for variable focal length.
+"""Legacy 1.x focal-cache helper; retained only for old project compatibility.
 
-The normal pipeline keeps one camera for all video frames.  When automatic
-focal length is enabled we clone that camera for short, consecutive frame
-segments and point each segment's images at its own camera record.  FastMap
-and GLOMAP can then optimize one focal length per segment while the original
-database remains untouched for retries and for the legacy fixed-focal path.
+Seedom 2.x does not import or call this module.  Its COLMAP path passes the
+native dynamic-focal BundleAdjustment options directly to ``global_mapper``
+and leaves the current database schema untouched.  The implementation remains
+available only so an older 1.x task or a user script can be inspected without
+breaking imports during migration.
 """
 
 from __future__ import annotations
@@ -144,6 +144,7 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
         'cameras_after': 0,
         'detect_cuts': bool(detect_cuts),
         'cut_boundaries': [],
+        'cut_group_breaks': [],
         'rig_metadata_detached': False,
     }
     with sqlite3.connect(str(destination)) as db:
@@ -176,11 +177,24 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
             for begin, end in zip(boundaries, boundaries[1:]):
                 shot = image_rows[begin:end]
                 for offset in range(0, len(shot), target_frames):
-                    segments.append(shot[offset:offset + target_frames])
-            for segment_index, segment in enumerate(segments):
+                    segments.append((begin, offset, shot[offset:offset + target_frames]))
+            for segment_index, (shot_begin, offset, segment) in enumerate(segments):
                 if not segment:
                     continue
                 original = cameras[camera_id]
+                # Leave an unused camera id at a detected cut.  The native
+                # dynamic-focal regularizer treats id gaps as hard boundaries,
+                # while ordinary 30-frame chunks inside one shot remain
+                # smooth and consecutive.
+                if shot_begin > 0 and offset == 0:
+                    db.execute(
+                        'INSERT INTO cameras (model, width, height, params, prior_focal_length) VALUES (?, ?, ?, ?, ?)',
+                        original[1:]
+                    )
+                    report['cut_group_breaks'].append({
+                        'source_camera_id': camera_id,
+                        'before_image': segment[0][2],
+                    })
                 # Reuse the original ID for the first segment.  COLMAP and
                 # FastMap expect the image-referenced camera IDs to start at
                 # 1; cloning every segment would leave camera 1 unused.

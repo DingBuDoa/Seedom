@@ -25,7 +25,8 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
     QStyleOptionViewItem, QStyle, QSizePolicy, QToolTip, QLayout)
 
 from tracker_core import Options, Pipeline, Cancelled
-from paths import ROOT, APP, CONFIG, LOGS, OUTPUTS, BINARY_DIRS, DEV_COLMAP, saved_path, portable_path
+from paths import (ROOT, APP, CONFIG, LOGS, OUTPUTS, BINARY_DIRS, DEV_COLMAP,
+                   RUNTIME_COLMAP_CUDA, PYTHON, saved_path, portable_path)
 from project_library import ProjectLibrary, model_ready
 from project_layout import result_directory, result_report, blend_filename
 from estimate import estimate_jobs
@@ -35,7 +36,7 @@ from task_queue import TaskQueue, MOVABLE_STATES
 from qt_dialogs import TaskDialog, BlenderDialog, button, label
 from blender_runtime import discover_blenders, probe_blender
 from qt_style import (STYLE, icon, inset_numeric_fields, style_for_theme,
-                      detect_system_theme, theme_color)
+                      detect_system_theme, theme_color, apply_palette_and_titlebars)
 from qt_updates import UpdatePanel
 from app_info import APP_NAME, APP_VERSION, SOLVER_CHOICES
 from json_store import atomic_write_json
@@ -44,7 +45,9 @@ from task_progress import live_remaining
 from system_actions import execute_power_action, power_action_label
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
-SOLVERS = {'colmap-cpu': 'COLMAP · 原生 Ceres CPU', 'fastmap': 'FastMap · 兼容模式',
+SOLVERS = {'colmap-global-cpu': 'COLMAP · 原生 Global Mapper（CPU）',
+           'colmap-global-cuda': 'COLMAP · 原生 Global Mapper（CUDA）',
+           'colmap-cpu': 'COLMAP · 原生 Global Mapper（CPU）', 'fastmap': 'FastMap · 兼容模式',
            'glomap-gpu': 'GLOMap · 旧版本', 'glomap-cpu': 'GLOMap · 旧版本', 'glomap': 'GLOMap · 旧版本'}
 
 
@@ -419,13 +422,24 @@ class MainWindow(QMainWindow):
         self.blender_discovery_running = False
         self.active_task_dialog = None
         self.environment_generation = 0
+        self.hardware_profile = {}
         known = {f.name for f in fields(Options)}
         values = {key: value for key, value in self.config.items() if key in known}
+        if 'smart_lens' not in values:
+            # Existing preferences keep their old meaning; a clean install
+            # gets the new recommended default through Options.
+            values['smart_lens'] = bool(values.get('auto_focal') or values.get('contains_cuts')) if ('auto_focal' in values or 'contains_cuts' in values) else True
         settings_error = None
         try:
             self.defaults = Options(**values).validate()
             for key in ('output_root', 'python'):
-                setattr(self.defaults, key, str(saved_path(getattr(self.defaults, key), self.config.get('distribution_root'))))
+                resolved = saved_path(getattr(self.defaults, key), self.config.get('distribution_root'))
+                # Existing dev settings may still contain the future package
+                # path ``runtime/python/python.exe``. Use the verified legacy
+                # runtime until the 2.0 runtime bundle is present.
+                if key == 'python' and not Path(resolved).is_file() and PYTHON.is_file():
+                    resolved = PYTHON
+                setattr(self.defaults, key, str(resolved))
         except (ValueError, TypeError) as error:
             self.defaults = Options(); settings_error = str(error)
         if Path(self.defaults.output_root).resolve() == ROOT / 'outputs':
@@ -721,7 +735,7 @@ class MainWindow(QMainWindow):
         self.gpu_choice.addItem(f'GPU {self.defaults.gpu_index}（等待检测）', self.defaults.gpu_index)
         self.default_controls['gpu_index'] = self.gpu_choice
         form.addRow('处理显卡', self.gpu_choice)
-        form.addRow(label('选择用于视频 CUDA 解码、特征提取、匹配及 FastMap 的 NVIDIA 显卡。COLMAP 2.0 的相机与点云 BA 使用 CPU/Ceres。'))
+        form.addRow(label('选择任务使用的 NVIDIA 显卡；多个 GPU 会分别显示型号和显存。'))
         self.gpu_choice.currentIndexChanged.connect(self.check_environment)
         self.reuse_failed_projects = QCheckBox('失败任务重试时复用原项目目录')
         self.reuse_failed_projects.setChecked(self.tasks.reuse_failed_projects)
@@ -742,12 +756,12 @@ class MainWindow(QMainWindow):
         self.environment_info = label('使用随软件提供的独立运行环境。'); form.addRow(self.environment_info)
         form.addRow(button('重新检测运行环境', self.check_environment)); layout.addWidget(group)
         group, form = settings_form('求解默认项')
-        self.auto_focal_default = QCheckBox('新建任务默认启用自动焦距（分段估计）')
-        self.auto_focal_default.setChecked(self.defaults.auto_focal)
-        self.auto_focal_default.setToolTip('适合变焦或希区柯克变焦素材；关闭时继续使用原来的单一焦距解算。新建任务中仍可单独调整。')
-        self.default_controls['auto_focal'] = self.auto_focal_default
-        form.addRow(self.auto_focal_default)
-        form.addRow(label('开启后让 FastMap 或 COLMAP 原生 Ceres 优化变焦焦距；连续单镜头会加入平滑约束，是否包含切镜在新建任务中选择。原始数据库会保留。'))
+        self.smart_lens_default = QCheckBox('新建任务默认启用智能变焦/切镜优化')
+        self.smart_lens_default.setChecked(self.defaults.smart_lens)
+        self.smart_lens_default.setToolTip('自动识别变焦和切镜，并使用适合的相机内参优化。')
+        self.default_controls['smart_lens'] = self.smart_lens_default
+        form.addRow(self.smart_lens_default)
+        form.addRow(label('新建任务可单独调整此选项；关闭后使用固定焦距解算。'))
         layout.addWidget(group)
         self.update_panel = UpdatePanel(ROOT, automatic=self.config.get('check_updates_on_startup', True) is not False,
                                        can_install=lambda: not self.busy,
@@ -801,7 +815,9 @@ class MainWindow(QMainWindow):
 
     def apply_theme(self):
         app = QApplication.instance()
-        app.setStyleSheet(style_for_theme(self.selected_theme()))
+        theme = self.selected_theme()
+        app.setStyleSheet(style_for_theme(theme))
+        apply_palette_and_titlebars(app, theme)
         if hasattr(self, 'table'):
             delegate = self.table.itemDelegate()
             if hasattr(delegate, 'refresh_theme'):
@@ -1182,7 +1198,7 @@ class MainWindow(QMainWindow):
         self.ensure_blender_versions()
         dialog = TaskDialog(self, self.defaults, paths=paths,
                             blender_records=self.blender_records, blender_settings=self.config,
-                            name_validator=self.tasks.validate_names)
+                            name_validator=self.tasks.validate_names, hardware_profile=self.hardware_profile)
         self.active_task_dialog = dialog
         try: accepted = dialog.exec() == QDialog.DialogCode.Accepted
         finally: self.active_task_dialog = None
@@ -1212,7 +1228,7 @@ class MainWindow(QMainWindow):
             self.ensure_blender_versions()
             dialog = TaskDialog(self, Options(**job['options']), job=job,
                                 blender_records=self.blender_records, blender_settings=self.config,
-                                name_validator=self.tasks.validate_names)
+                                name_validator=self.tasks.validate_names, hardware_profile=self.hardware_profile)
             self.active_task_dialog = dialog
             try: accepted = dialog.exec() == QDialog.DialogCode.Accepted
             finally: self.active_task_dialog = None
@@ -1510,7 +1526,8 @@ class MainWindow(QMainWindow):
             try:
                 profile = get_hardware(python, force=True, gpu_index=gpu_index)
                 text = describe_hardware(profile)
-                colmap_ready = (BINARY_DIRS['01 GLOMAP'] / 'colmap.exe').is_file() or DEV_COLMAP.is_file()
+                colmap_ready = ((BINARY_DIRS['01 GLOMAP'] / 'colmap.exe').is_file()
+                                or DEV_COLMAP.is_file() or RUNTIME_COLMAP_CUDA.is_file())
                 text += ' · 原生 COLMAP ' + ('已就绪' if colmap_ready else '待构建')
             except Exception as error:
                 profile = {**system_information(), 'gpu_index': gpu_index, 'error': str(error)}
@@ -1753,6 +1770,7 @@ class MainWindow(QMainWindow):
                 if event.get('generation', self.environment_generation) != self.environment_generation:
                     continue
                 if 'profile' in event:
+                    self.hardware_profile = event['profile'] or {}
                     self.update_gpu_choices(event['profile'])
                 self.hardware_label.setFullText(event['summary'])
                 self.hardware_label.setToolTip(f"{event['summary']}\n{event['text']}")

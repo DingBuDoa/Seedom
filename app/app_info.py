@@ -3,7 +3,7 @@ APP_NAME = '拾点VFX（SeedomVFX）'
 APP_VERSION = '2.0.0-dev'
 BUILD_DATE = '2026-11-14'
 PROJECT_URL = 'https://github.com/DingBuDoa/Seedom'
-SOLVER_CHOICES = {'colmap': 'COLMAP · 原生 Ceres CPU', 'fastmap': 'FastMap · 兼容模式'}
+SOLVER_CHOICES = {'colmap': 'COLMAP · 原生 Global Mapper', 'fastmap': 'FastMap · 兼容模式'}
 
 # Versions checked against bundled source/package metadata and executable help.
 OPEN_SOURCE_PROJECTS = (

@@ -4,18 +4,37 @@ import hashlib
 import json
 import math
 import os
+import re
 import sqlite3
 import subprocess
 
 from paths import BINARY_DIRS
 from project_layout import cache_directory
 
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.bmp', '.exr'}
+
+
+def image_sort_key(path):
+    return [int(part) if part.isdigit() else part.casefold()
+            for part in re.split(r'(\d+)', path.name)]
+
 
 def source_signature(video, options):
     video = Path(video).resolve()
-    stat = video.stat()
-    signature = {'source': str(video), 'size': stat.st_size, 'mtime_ns': stat.st_mtime_ns,
+    if video.is_dir():
+        files = sorted((path for path in video.iterdir()
+                        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS),
+                       key=image_sort_key)
+        size = sum(path.stat().st_size for path in files)
+        mtime_ns = max((path.stat().st_mtime_ns for path in files), default=video.stat().st_mtime_ns)
+    else:
+        stat = video.stat()
+        files = None
+        size, mtime_ns = stat.st_size, stat.st_mtime_ns
+    signature = {'source': str(video), 'size': size, 'mtime_ns': mtime_ns,
                  'fps': float(options.fps), 'max_size': options.max_size, 'overlap': options.overlap}
+    if files is not None:
+        signature.update(input_type='image_sequence', image_count=len(files))
     # Preserve legacy cache identities when processing at the original size.
     if options.image_scale != 1:
         signature['image_scale'] = options.image_scale
@@ -26,6 +45,19 @@ def video_scene(video, options):
     signature = source_signature(video, options)
     key = hashlib.sha256(json.dumps(signature, sort_keys=True).encode()).hexdigest()[:8]
     return Path(options.output_root).resolve() / f'{Path(video).stem}_{key}'
+
+
+def image_sequence_info(sequence):
+    sequence = Path(sequence)
+    if not sequence.is_dir():
+        raise ValueError('图像序列目录不存在')
+    files = sorted((path for path in sequence.iterdir()
+                    if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS),
+                   key=image_sort_key)
+    if len(files) < 3:
+        raise ValueError(f'图像序列至少需要 3 张图片，当前只有 {len(files)} 张')
+    return {'frames': len(files), 'width': None, 'height': None, 'codec': 'image-sequence',
+            'fps': 0, 'duration': 0, 'path': str(sequence.resolve())}
 
 
 def video_info(video, fps):
@@ -73,6 +105,11 @@ def describe_workload(source, options, existing_scene=False, resume_scene=None):
                                                  and any((scene / 'images').glob('frame_*.jpg'))),
             'features': not ready and not ((scene / '.features-complete').exists() and database.is_file()),
             'matching': not ready and not (scene / '.matching-complete').exists()}
-    info = {'frames': images, 'width': None, 'height': None, 'codec': None} if existing_scene else video_info(source, options.fps)
+    if existing_scene:
+        info = {'frames': images, 'width': None, 'height': None, 'codec': None}
+    elif options.input_type == 'image_sequence':
+        info = image_sequence_info(source)
+    else:
+        info = video_info(source, options.fps)
     return {**info, 'stages': work, 'existing_scene': existing_scene,
             'pairs': pairs if not work['matching'] else None}

@@ -210,7 +210,8 @@ class TaskQueue:
                     # Only the production queue performs this preflight. Test and
                     # embedding pipeline factories may intentionally use virtual paths.
                     source = Path(path)
-                    source_valid = source.is_dir() if scene else source.is_file()
+                    input_type = job.get('options', {}).get('input_type', 'video')
+                    source_valid = source.is_dir() if (scene or input_type == 'image_sequence') else source.is_file()
                     if self.pipeline_factory is Pipeline and not source_valid:
                         message = f'源文件不存在，已跳过处理：{source}'
                         self._diagnostic(pipeline, iid, '[源文件丢失] ' + message + '\n')

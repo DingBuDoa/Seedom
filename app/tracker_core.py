@@ -13,16 +13,18 @@ import threading
 import time
 import uuid
 
-from paths import ROOT, APP, FASTMAP, PYTHON, OUTPUTS, BINARY_DIRS, DEV_COLMAP, runtime_environment
+from paths import (ROOT, APP, FASTMAP, PYTHON, OUTPUTS, BINARY_DIRS,
+                   DEV_COLMAP, DEV_COLMAP_CUDA, RUNTIME_COLMAP, RUNTIME_COLMAP_CUDA,
+                   use_dev_cuda_colmap, runtime_environment)
 from hardware import get_hardware, describe_hardware, settings_signature
-from workload import source_signature, video_scene, describe_workload
+from workload import source_signature, video_scene, describe_workload, image_sort_key
 from native_paths import NativePaths
 from project_layout import create_project, cache_directory, result_report, safe_name
 from json_store import atomic_write_json
 from task_progress import TaskProgress
 from solver_quality import SOLVER_PROFILES, OPTIMIZATION_REVISION
-from zoom_focal import prepare_auto_focal_database
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.mkv', '.avi', '.m4v', '.webm', '.mts', '.m2ts', '.wmv', '.mpg', '.mpeg'}
+IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp', '.bmp', '.exr'}
 HIDE_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
 
 
@@ -48,6 +50,11 @@ class Options:
     sequence_original: bool = False
     solver_quality: str = 'balanced'
     gpu_index: int = 0
+    use_gpu: bool = True
+    input_type: str = 'video'
+    # User-facing camera analysis switch.  The two fields below remain only
+    # as compatibility aliases for 1.x task JSON files.
+    smart_lens: bool = True
     auto_focal: bool = False
     contains_cuts: bool = False
     rotation_only: bool = False
@@ -60,7 +67,7 @@ class Options:
         for key in ('max_size', 'overlap', 'gpu_min_images', 'gpu_index'):
             if type(getattr(self, key)) is not int:
                 raise ValueError(f'{key} 必须是整数')
-        for key in ('cuda_decode', 'color', 'glomap_gpu', 'export_sequence', 'sequence_original', 'auto_focal', 'contains_cuts', 'rotation_only'):
+        for key in ('cuda_decode', 'color', 'glomap_gpu', 'export_sequence', 'sequence_original', 'smart_lens', 'auto_focal', 'contains_cuts', 'rotation_only', 'use_gpu'):
             if type(getattr(self, key)) is not bool:
                 raise ValueError(f'{key} 必须是布尔值')
         for key in ('python', 'output_root'):
@@ -71,6 +78,12 @@ class Options:
             self.backend = 'colmap'
         if self.backend not in ('fastmap', 'colmap') or self.camera_mode not in ('radial', 'pinhole', 'calibrated'):
             raise ValueError('未知求解器或相机模式')
+        if self.input_type not in ('video', 'image_sequence'):
+            raise ValueError('未知输入类型')
+        if self.backend == 'fastmap' and not self.use_gpu:
+            raise ValueError('FastMap 需要启用 GPU 硬件加速；如需 CPU，请选择 COLMAP。')
+        if self.input_type == 'image_sequence' and self.export_sequence:
+            raise ValueError('图像序列输入不需要再次导出序列帧。')
         if self.rotation_only and self.backend != 'fastmap':
             raise ValueError('低视差仅旋转保护目前只支持 FastMap')
         if not isinstance(self.solver_quality, str) or self.solver_quality not in SOLVER_PROFILES:
@@ -86,13 +99,22 @@ class Options:
         return self
 
 
-def find_binary(folder, name):
+def find_binary(folder, name, use_cuda=None):
+    if use_cuda is None:
+        use_cuda = use_dev_cuda_colmap()
+    if folder == '01 GLOMAP' and name == 'colmap.exe' and use_cuda:
+        for path in (RUNTIME_COLMAP_CUDA, DEV_COLMAP_CUDA):
+            if path.is_file():
+                return path
     for directory in (BINARY_DIRS[folder], BINARY_DIRS[folder] / 'bin'):
         path = directory / name
         if path.is_file():
             return path
-    if folder == '01 GLOMAP' and name == 'colmap.exe' and DEV_COLMAP.is_file():
-        return DEV_COLMAP
+    if folder == '01 GLOMAP' and name == 'colmap.exe':
+        for path in ((DEV_COLMAP_CUDA, RUNTIME_COLMAP_CUDA) if use_cuda else
+                     (DEV_COLMAP, RUNTIME_COLMAP)):
+            if path.is_file():
+                return path
     raise FileNotFoundError(f'找不到 {folder}/{name}')
 
 
@@ -122,6 +144,7 @@ class Pipeline:
         self.warnings = []
         self.workload = None
         self.progress = TaskProgress(options, self.emit)
+        self.cuda_enabled = bool(use_dev_cuda_colmap() and options.use_gpu)
 
     def warn_solver(self, code, text):
         if any(item['code'] == code for item in self.warnings):
@@ -139,6 +162,16 @@ class Pipeline:
             if self.progress.key:
                 self.progress.begin(self.progress.key, force=True)
             self.warn_solver('cpu_fallback', 'GLOMap 已回退到 CPU，任务将继续求解和导出，处理速度可能降低。')
+
+    def observe_colmap_output(self, line):
+        lowered = line.casefold()
+        if ('compiled without cuda support' in lowered
+                or 'falling back to cpu-based' in lowered
+                or 'falling back to cpu based' in lowered):
+            self.warn_solver(
+                'colmap_cpu_fallback',
+                '当前 COLMAP 的 Ceres 未编译 CUDA/cuDSS，Bundle Adjustment 已回退到 CPU；任务会继续，但显卡不会参与该阶段。',
+            )
 
     def observe_fastmap_output(self, line):
         if '[LOW_PARALLAX]' in line:
@@ -250,6 +283,9 @@ class Pipeline:
         destination = cache / 'retry_history' / (datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6])
         destination.mkdir(parents=True)
         for name in ('source.json', 'images', 'database.db', 'database.db-wal', 'database.db-shm',
+                     # Legacy 1.x focal-cache artifacts are never read now,
+                     # but move them aside on retry so stale files cannot be
+                     # mistaken for the native COLMAP database.
                      'database-auto-focal.db', 'auto-focal.json',
                      '.frames-complete', '.features-complete', '.matching-complete'):
             path = cache / name
@@ -308,7 +344,7 @@ class Pipeline:
         if Path(args[0]).name.lower() in ('colmap.exe', 'glomap.exe', 'gpu_solver_probe.exe'):
             with NativePaths() as native:
                 native_env = os.environ.copy()
-                native_env.update(runtime_environment())
+                native_env.update(runtime_environment(cuda=self.cuda_enabled))
                 native_env.update(env or {})
                 mapped, native_cwd, native_env = native.command(args, cwd or ROOT, native_env)
                 if mapped != [str(arg) for arg in args]:
@@ -325,7 +361,7 @@ class Pipeline:
             log_path.rename(log_path.with_stem(log_path.stem + '_' + uuid.uuid4().hex[:6]))
         self.emit('log', text=f'\n[{label}] {subprocess.list2cmdline(args)}\n')
         process_env = os.environ.copy()
-        process_env.update(runtime_environment())
+        process_env.update(runtime_environment(cuda=self.cuda_enabled))
         process_env.update({'PYTHONUNBUFFERED': '1', 'PYTHONIOENCODING': 'utf-8',
                             'OMP_NUM_THREADS': '4', 'OPENBLAS_NUM_THREADS': '4', 'NO_COLOR': '1',
                             'LOGURU_COLORIZE': 'False'})
@@ -349,6 +385,8 @@ class Pipeline:
                     self.progress.observe(label, line)
                     if label == '04-glomap':
                         self.observe_glomap_output(line)
+                    elif label == '04-colmap':
+                        self.observe_colmap_output(line)
                     elif label == '04-fastmap':
                         self.observe_fastmap_output(line)
                 exit_code = child.wait()
@@ -377,7 +415,7 @@ class Pipeline:
     def preflight(self):
         o = self.options
         o.validate()
-        find_binary('01 GLOMAP', 'colmap.exe')
+        find_binary('01 GLOMAP', 'colmap.exe', use_cuda=self.cuda_enabled)
         if o.backend == 'fastmap':
             for p in (Path(o.python), FASTMAP / 'run.py', APP / 'fastmap_worker.py'):
                 if not p.is_file():
@@ -385,7 +423,7 @@ class Pipeline:
         else:
             # COLMAP is the native 2.0 solver. Its CPU Ceres mapper does not
             # require the retired GLOMAP binary or CUDA/cuDSS probe.
-            find_binary('01 GLOMAP', 'colmap.exe')
+            find_binary('01 GLOMAP', 'colmap.exe', use_cuda=self.cuda_enabled)
 
     def prepare_video(self, video):
         o = self.options
@@ -412,7 +450,7 @@ class Pipeline:
             self.emit('log', text='[复用] 视频帧已完成。\n')
         else:
             args = [find_binary('03 FFMPEG', 'ffmpeg.exe'), '-hide_banner', '-loglevel', 'error', '-stats', '-y']
-            if o.cuda_decode:
+            if self.cuda_enabled and o.cuda_decode:
                 args += ['-hwaccel', 'cuda', '-hwaccel_device', str(o.gpu_index)]
             args += ['-i', video, '-map', '0:v:0', '-an']
             filters = video_filters(o)
@@ -422,7 +460,7 @@ class Pipeline:
             try:
                 self.command(args, '01-frames')
             except RuntimeError:
-                if not o.cuda_decode:
+                if not (self.cuda_enabled and o.cuda_decode):
                     raise
                 self.emit('log', text='[提示] CUDA 解码失败，改用 CPU 解码；求解设置不变。\n')
                 index = args.index('-hwaccel')
@@ -434,15 +472,44 @@ class Pipeline:
             marker.write_text(str(count), encoding='utf-8')
         return scene
 
+    def prepare_image_sequence(self, sequence):
+        """Create a project around an existing image directory.
+
+        The source directory is passed directly to the solver. FFmpeg is not
+        called and the source images are not duplicated into the private cache.
+        """
+        sequence = Path(sequence).resolve()
+        if not sequence.is_dir():
+            raise ValueError(f'图像序列目录不存在：{sequence}')
+        images = sorted((path for path in sequence.iterdir()
+                         if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS),
+                        key=image_sort_key)
+        if len(images) < 3:
+            raise ValueError(f'图像序列至少需要 3 张图片，当前只有 {len(images)} 张。')
+        signature = source_signature(sequence, self.options)
+        scene = self.new_project(sequence, signature)
+        cache = cache_directory(scene)
+        manifest = cache / 'source.json'
+        if manifest.exists() and json.loads(manifest.read_text(encoding='utf-8')) != signature:
+            raise RuntimeError(f'输入设置与已有场景不一致：{scene}')
+        manifest.write_text(json.dumps(signature, ensure_ascii=False, indent=2), encoding='utf-8')
+        self.emit('stage', index=1, total=5, text=f'使用图像序列（{len(images)} 张）')
+        self.emit('log', text=f'[图像序列] 直接使用 {sequence}，跳过视频拆分。\n')
+        return scene
+
     def run(self, source, existing_scene=False):
         task_started = time.perf_counter()
+        self.cuda_enabled = bool(self.options.use_gpu and
+                                 (use_dev_cuda_colmap() or RUNTIME_COLMAP_CUDA.is_file() or DEV_COLMAP_CUDA.is_file()))
         self.preflight()
         o = self.options
         hardware = get_hardware(o.python, force=True, gpu_index=o.gpu_index)
-        if not any(device['index'] == o.gpu_index for device in hardware.get('devices', [])):
+        if o.use_gpu and not any(device['index'] == o.gpu_index for device in hardware.get('devices', [])):
             raise RuntimeError(f'所选 GPU {o.gpu_index} 不可用，请在设置中重新检测并选择显卡。')
-        if o.backend == 'fastmap' and not hardware.get('cuda_usable'):
+        if o.use_gpu and o.backend == 'fastmap' and not hardware.get('cuda_usable'):
             raise RuntimeError(f'所选 GPU {o.gpu_index} 无法执行 CUDA：' + hardware.get('error', '请检查驱动与运行环境。'))
+        if o.use_gpu and not self.cuda_enabled:
+            raise RuntimeError('GPU 求解器未安装或不可用，请使用 Start-CUDA.bat，或关闭硬件加速改用 CPU。')
         self.check_cancel()
         self.emit('log', text='[硬件] ' + describe_hardware(hardware) + '\n')
         # Metadata collection must not prevent a valid native-solver run.
@@ -470,7 +537,12 @@ class Pipeline:
         else:
             if o.camera_mode == 'calibrated':
                 raise ValueError('已标定模式需要先准备含准确内参的场景数据库')
-            scene = self.prepare_video(source)
+            if o.input_type == 'image_sequence':
+                scene = self.prepare_image_sequence(source)
+                images = Path(source).resolve()
+            else:
+                scene = self.prepare_video(source)
+                images = None
             workload = self.workload or workload
             if workload:
                 try:
@@ -480,56 +552,62 @@ class Pipeline:
                 except Exception:
                     pass
             cache = cache_directory(scene)
-            images = cache / 'images'
+            if images is None:
+                images = cache / 'images'
         database = cache / 'database.db'
-        colmap = find_binary('01 GLOMAP', 'colmap.exe')
-        self.emit('stage', index=2, total=5, text='GPU 特征提取')
+        colmap = find_binary('01 GLOMAP', 'colmap.exe', use_cuda=self.cuda_enabled)
+        extraction_device = 'CUDA' if self.cuda_enabled else 'CPU'
+        extraction_gpu = '1' if self.cuda_enabled else '0'
+        extraction_index = str(o.gpu_index) if self.cuda_enabled else '-1'
+        self.emit('stage', index=2, total=5, text=f'{extraction_device} 特征提取')
         shared_ready = existing_scene and database.is_file() and database_counts(database)['pairs'] > 0
         if shared_ready:
             self.emit('log', text='[复用] 已有匹配数据库；本次只执行求解和导出。\n')
         elif not ((cache / '.features-complete').exists() and database.is_file()):
+            # COLMAP 4.x moved the device controls from the Sift-specific
+            # option groups to the command-wide FeatureExtraction group.
             self.command([colmap, 'feature_extractor', '--database_path', database, '--image_path', images,
-                          '--ImageReader.single_camera', '1', '--SiftExtraction.use_gpu', '1',
-                          '--SiftExtraction.gpu_index', str(o.gpu_index), '--SiftExtraction.max_image_size', str(o.max_size)], '02-features')
+                          '--ImageReader.single_camera', '1', '--FeatureExtraction.use_gpu', extraction_gpu,
+                          '--FeatureExtraction.gpu_index', extraction_index,
+                          '--FeatureExtraction.max_image_size', str(o.max_size)], '02-features')
             (cache / '.features-complete').write_text('complete', encoding='utf-8')
-        self.emit('stage', index=3, total=5, text='GPU 序列匹配')
+        self.emit('stage', index=3, total=5, text=f'{extraction_device} 序列匹配')
         if not shared_ready and not (cache / '.matching-complete').exists():
             self.command([colmap, 'sequential_matcher', '--database_path', database,
-                          '--SiftMatching.use_gpu', '1', '--SiftMatching.gpu_index', str(o.gpu_index),
+                          '--FeatureMatching.use_gpu', extraction_gpu, '--FeatureMatching.gpu_index', extraction_index,
                           '--SequentialMatching.overlap', str(o.overlap)], '03-matching')
             (cache / '.matching-complete').write_text('complete', encoding='utf-8')
         counts = database_counts(database)
         if counts['images'] < 3 or counts['pairs'] < 2:
             raise RuntimeError(f'有效图像/匹配不足：{counts}')
-        solve_database = database
-        auto_focal_report = None
-        if o.auto_focal:
-            solve_database = cache / 'database-auto-focal.db'
-            auto_focal_report = prepare_auto_focal_database(
-                database, solve_database, cache / 'auto-focal.json',
-                images_dir=images, detect_cuts=o.contains_cuts)
-            segment_count = len(auto_focal_report['segments'])
-            if segment_count < 1:
-                raise RuntimeError('自动焦距没有生成有效的相机分段。')
-            focal_mode = '切镜检测' if o.contains_cuts else '连续镜头平滑'
+        # ``smart_lens`` is the public switch.  The fallback keeps 1.x option
+        # objects operational if a caller constructs one without migration.
+        smart_lens = bool(getattr(o, 'smart_lens', o.auto_focal or o.contains_cuts))
+        if smart_lens:
             self.emit('log', text=(
-                f'[自动焦距] 已使用“{focal_mode}”建立 {segment_count} 个焦距段，'
-                f'每段约 {auto_focal_report["target_frames"]} 帧；原始数据库保留不变。\n'))
-        mode = 'fastmap' if o.backend == 'fastmap' else 'colmap-cpu'
+                '[智能镜头] 使用原生 COLMAP 动态焦距 BA；'
+                '数据库保持原始 Schema，不再复制或修改 database.db。\n'))
+        if o.backend == 'fastmap':
+            mode = 'fastmap'
+        else:
+            mode = 'colmap-global-cuda' if self.cuda_enabled else 'colmap-global-cpu'
         run_id = datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6]
         result = self.project_dir / '_cache' / ('solve_' + run_id)
         self.emit('stage', index=4, total=5, text=f'{mode} 相机与点云求解')
         started = time.perf_counter()
-        gpu_solver_active = o.backend == 'fastmap'
+        # Global Mapper can accelerate global positioning with CUDA.  Ceres
+        # Bundle Adjustment is reported separately and may still fall back to
+        # CPU when the bundled Ceres was built without CUDA/cuDSS.
+        gpu_solver_active = o.backend == 'fastmap' or (o.backend == 'colmap' and self.cuda_enabled)
         if o.backend == 'fastmap':
             args = [o.python, '-u', APP / 'fastmap_worker.py', '--device', f'cuda:{o.gpu_index}',
-                    '--headless', '--database', solve_database, '--output_dir', result,
+                    '--headless', '--database', database, '--output_dir', result,
                     '--solver-quality', o.solver_quality]
             if o.color:
                 args += ['--image_dir', images]
             if o.camera_mode in ('pinhole', 'calibrated'):
                 args += ['--' + o.camera_mode]
-            if o.auto_focal and not o.contains_cuts:
+            if smart_lens:
                 args += ['--smooth-focal']
             if o.rotation_only:
                 args += ['--rotation-only']
@@ -542,19 +620,33 @@ class Pipeline:
             result.mkdir(parents=True)
             sparse = result / 'sparse'
             sparse.mkdir()
-            args = [colmap, 'mapper', '--database_path', solve_database, '--image_path', images,
-                    '--output_path', sparse, '--log_to_stderr', '1']
-            args += ['--Mapper.ba_use_gpu', '0', '--Mapper.ba_gpu_index', '-1']
-            self.emit('log', text='[求解器] 使用原生 COLMAP Incremental Mapper + Ceres CPU。\n')
-            if o.auto_focal:
-                # The derived database keeps one camera per temporal segment;
-                # COLMAP applies the smoothness residuals inside native Ceres.
-                args += ['--Mapper.ba_refine_focal_length', '1',
-                         '--Mapper.ba_dynamic_focal_length', '1',
-                         '--Mapper.ba_dynamic_focal_first_order_weight', '10',
-                         '--Mapper.ba_dynamic_focal_second_order_weight', '2',
-                         '--Mapper.ba_refine_principal_point', '0']
-                self.emit('log', text='[自动焦距] COLMAP Ceres 将对分段相机执行原生动态焦距平滑 BA；主点保持不变。\n')
+            # COLMAP's global mapper follows the same global rotation /
+            # positioning strategy as GLOMAP and avoids slow sequential image
+            # registration.  Keep logging on stderr because COLMAP 4.x no
+            # longer accepts the old standalone --log_to_stderr switch.
+            args = [colmap, 'global_mapper', '--database_path', database, '--image_path', images,
+                    '--output_path', sparse, '--log_target', 'stderr',
+                    '--GlobalMapper.gp_use_gpu', '1' if self.cuda_enabled else '0',
+                    '--GlobalMapper.gp_gpu_index', str(o.gpu_index) if self.cuda_enabled else '-1',
+                    '--GlobalMapper.ba_ceres_use_gpu', '1' if self.cuda_enabled else '0',
+                    '--GlobalMapper.ba_gpu_index', str(o.gpu_index) if self.cuda_enabled else '-1']
+            if self.cuda_enabled:
+                self.emit('log', text=(
+                    '[求解器] 使用原生 COLMAP Global Mapper；全局定位与中等规模 BA 使用 CUDA 密集 Schur，'
+                    '超大规模 BA 因当前 Ceres 未带 cuDSS 会使用 CPU 稀疏 Schur。\n'))
+            else:
+                self.emit('log', text='[求解器] 使用原生 COLMAP Global Mapper + CPU。\n')
+            if smart_lens:
+                # Dynamic focal length is implemented by the native COLMAP
+                # BundleAdjustment options.  Do not rewrite the SQLite
+                # database: current COLMAP cameras use ``source`` instead of
+                # the old ``prior_focal_length`` column.
+                args += ['--GlobalMapper.ba_refine_focal_length', '1',
+                         '--GlobalMapper.ba_refine_principal_point', '0',
+                         '--GlobalMapper.ba_dynamic_focal_length', '1',
+                         '--GlobalMapper.ba_dynamic_focal_first_order_weight', '10',
+                         '--GlobalMapper.ba_dynamic_focal_second_order_weight', '2']
+                self.emit('log', text='[智能镜头] 已启用 COLMAP 原生动态焦距 BA；不修改输入数据库。\n')
             self.command(args, '04-colmap', cwd=colmap.parent)
         elapsed = time.perf_counter() - started
         model = result / 'sparse/0'
@@ -593,7 +685,9 @@ class Pipeline:
         if metrics.get('mean_reprojection_error_px') is not None and metrics.get('mean_reprojection_error_px', 0) > 2:
             self.emit('log', text='[质量提示] 平均重投影误差超过 2 像素，建议检查相机轨迹和点云，再决定是否用于正式镜头。\n')
         sequence = None
-        if o.export_sequence:
+        if o.export_sequence and o.input_type == 'image_sequence':
+            self.emit('log', text='[图像序列] 输入已经是序列帧，跳过再次导出。\n')
+        if o.export_sequence and o.input_type != 'image_sequence':
             if existing_scene:
                 manifest = cache / 'source.json'
                 original = json.loads(manifest.read_text(encoding='utf-8')).get('source') if manifest.is_file() else None
@@ -627,8 +721,9 @@ class Pipeline:
                    'hardware': hardware, 'estimate_settings': settings_signature(o), 'workload': workload,
                    'phase_seconds': self.progress.timings(),
                    'completed_at': datetime.now().isoformat(timespec='seconds')}
-        if auto_focal_report is not None:
-            summary['auto_focal'] = auto_focal_report
+        if smart_lens:
+            summary['smart_lens'] = True
+            summary['focal_mode'] = 'native_dynamic_ba'
         if o.backend == 'fastmap':
             summary['optimization_policy'] = dict(SOLVER_PROFILES[o.solver_quality],
                                                   profile=o.solver_quality, revision=OPTIMIZATION_REVISION)

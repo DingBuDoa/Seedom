@@ -6,7 +6,9 @@ import subprocess
 from tkinter import ttk, filedialog, messagebox, simpledialog
 
 
-SOLVERS = {'colmap-cpu':'COLMAP · 原生 Ceres CPU', 'glomap-gpu':'GLOMap · 旧版本',
+SOLVERS = {'colmap-global-cpu':'COLMAP · 原生 Global Mapper（CPU）',
+           'colmap-global-cuda':'COLMAP · 原生 Global Mapper（CUDA）',
+           'colmap-cpu':'COLMAP · 原生 Global Mapper（CPU）', 'glomap-gpu':'GLOMap · 旧版本',
            'glomap-cpu':'GLOMap · 旧版本', 'fastmap':'FastMap · 兼容模式'}
 
 

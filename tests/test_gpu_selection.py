@@ -77,7 +77,7 @@ class GpuSelectionTests(unittest.TestCase):
                     result = pipeline.run(video)
                 self.assertEqual(result['status'], 'complete')
                 self.assertEqual(probe.call_args.kwargs['gpu_index'], 1)
-                for label, flag in (('02-features', '--SiftExtraction.gpu_index'), ('03-matching', '--SiftMatching.gpu_index')):
+                for label, flag in (('02-features', '--FeatureExtraction.gpu_index'), ('03-matching', '--FeatureMatching.gpu_index')):
                     args = calls[label][0]
                     self.assertEqual(args[args.index(flag) + 1], '1')
                 args = calls['01-frames'][0]

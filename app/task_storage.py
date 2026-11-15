@@ -32,7 +32,13 @@ def restore_jobs(path, previous_root=None):
             for key in ('error', 'export_error', 'stage', 'created_at'):
                 if key in job and not isinstance(job[key], str):
                     raise ValueError(f'无效的 {key}')
-            options = Options(**job['options']).validate()
+            option_data = dict(job['options'])
+            # 1.x records did not have the public smart-lens switch.  Infer it
+            # from the two retired flags instead of silently enabling it.
+            if 'smart_lens' not in option_data:
+                option_data['smart_lens'] = bool(option_data.get('auto_focal') or
+                                                 option_data.get('contains_cuts'))
+            options = Options(**option_data).validate()
             for key in ('python', 'output_root'):
                 setattr(options, key, str(saved_path(getattr(options, key), previous_root)))
             job['options'] = asdict(options)
