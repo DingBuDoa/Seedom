@@ -18,7 +18,7 @@ from paths import (ROOT, APP, FASTMAP, PYTHON, OUTPUTS, BINARY_DIRS,
                    DEV_GLOMAP, DEV_GLOMAP_CUDA, RUNTIME_GLOMAP, RUNTIME_GLOMAP_CUDA,
                    use_dev_cuda_colmap, runtime_environment)
 from hardware import get_hardware, describe_hardware, settings_signature
-from workload import source_signature, video_scene, describe_workload, image_sort_key
+from workload import source_signature, video_scene, describe_workload, image_sort_key, video_info
 from native_paths import NativePaths
 from project_layout import create_project, cache_directory, result_report, safe_name
 from json_store import atomic_write_json
@@ -47,6 +47,9 @@ class Options:
     gpu_min_images: int = 50
     glomap_gpu: bool = False
     image_scale: float = 1.0
+    # User supplied starting focal length in original image pixels. Zero keeps
+    # COLMAP's automatic focal-length initialization.
+    initial_focal_length: float = 0.0
     export_sequence: bool = False
     sequence_original: bool = False
     solver_quality: str = 'balanced'
@@ -61,7 +64,7 @@ class Options:
     rotation_only: bool = False
 
     def validate(self):
-        for key in ('fps', 'image_scale'):
+        for key in ('fps', 'image_scale', 'initial_focal_length'):
             value = getattr(self, key)
             if type(value) not in (int, float) or not math.isfinite(value):
                 raise ValueError(f'{key} 必须是有限数值')
@@ -98,6 +101,8 @@ class Options:
             raise ValueError('GPU 编号不能小于 0')
         if not 0.1 <= self.image_scale <= 1:
             raise ValueError('处理分辨率比例需要在 0.1 到 1 之间')
+        if self.initial_focal_length < 0:
+            raise ValueError('初始焦距不能小于 0')
         return self
 
 
@@ -597,10 +602,38 @@ class Pipeline:
         elif not ((cache / '.features-complete').exists() and database.is_file()):
             # COLMAP 4.x moved the device controls from the Sift-specific
             # option groups to the command-wide FeatureExtraction group.
-            self.command([colmap, 'feature_extractor', '--database_path', database, '--image_path', images,
-                          '--ImageReader.single_camera', '1', '--FeatureExtraction.use_gpu', extraction_gpu,
-                          '--FeatureExtraction.gpu_index', extraction_index,
-                          '--FeatureExtraction.max_image_size', str(o.max_size)], '02-features')
+            feature_args = [colmap, 'feature_extractor', '--database_path', database, '--image_path', images,
+                            '--ImageReader.single_camera', '1', '--FeatureExtraction.use_gpu', extraction_gpu,
+                            '--FeatureExtraction.gpu_index', extraction_index,
+                            '--FeatureExtraction.max_image_size', str(o.max_size)]
+            if o.initial_focal_length > 0:
+                width = (workload or {}).get('width')
+                height = (workload or {}).get('height')
+                if not width or not height:
+                    try:
+                        first_image = next(path for path in sorted(Path(images).iterdir())
+                                           if path.suffix.lower() in IMAGE_EXTENSIONS)
+                        info = video_info(first_image, 0)
+                        width, height = info.get('width'), info.get('height')
+                    except (StopIteration, OSError, ValueError, KeyError):
+                        width = height = None
+                if width and height:
+                    scale = float(o.image_scale)
+                    width, height = float(width) * scale, float(height) * scale
+                    focal = float(o.initial_focal_length) * scale
+                    cx, cy = width / 2.0, height / 2.0
+                    if o.camera_mode == 'pinhole':
+                        camera_model, params = 'PINHOLE', f'{focal:g},{cx:g},{cy:g}'
+                    else:
+                        camera_model, params = 'SIMPLE_RADIAL', f'{focal:g},{cx:g},{cy:g},0'
+                    feature_args += ['--ImageReader.camera_model', camera_model,
+                                     '--ImageReader.camera_params', params]
+                    self.emit('log', text=(
+                        f'[焦距先验] 使用初始焦距 {o.initial_focal_length:g} px '
+                        f'（处理尺寸 {int(width)}×{int(height)}）。\n'))
+                else:
+                    self.emit('log', text='[焦距先验] 无法读取图像尺寸，已回退自动估计。\n')
+            self.command(feature_args, '02-features')
             (cache / '.features-complete').write_text('complete', encoding='utf-8')
         self.emit('stage', index=3, total=5, text=f'{extraction_device} 序列匹配')
         if not shared_ready and not (cache / '.matching-complete').exists():

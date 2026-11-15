@@ -38,6 +38,8 @@ def source_signature(video, options):
     # Preserve legacy cache identities when processing at the original size.
     if options.image_scale != 1:
         signature['image_scale'] = options.image_scale
+    if getattr(options, 'initial_focal_length', 0):
+        signature['initial_focal_length'] = options.initial_focal_length
     return signature
 
 

@@ -470,6 +470,14 @@ class TaskDialog(QDialog):
         self.smart_lens.setChecked(bool(getattr(options, 'smart_lens', legacy_smart)))
         self.smart_lens.setToolTip('自动识别变焦和切镜，并使用适合的相机内参优化。')
         form.addRow(self.smart_lens)
+        self.initial_focal = QDoubleSpinBox()
+        self.initial_focal.setRange(0, 100000)
+        self.initial_focal.setDecimals(1)
+        self.initial_focal.setSingleStep(10)
+        self.initial_focal.setValue(float(getattr(options, 'initial_focal_length', 0)))
+        self.initial_focal.setSuffix(' px')
+        self.initial_focal.setToolTip('输入原始素材像素坐标中的初始焦距；0 = 自动估计。它只作为起点，不会锁定焦距。')
+        form.addRow('初始焦距（可选）', self.initial_focal)
         acceleration_row = QHBoxLayout()
         self.acceleration = QCheckBox('启用 GPU 硬件加速')
         self.acceleration.setChecked(bool(options.use_gpu))
@@ -937,6 +945,7 @@ class TaskDialog(QDialog):
                 'glomap_gpu': False,
                 'export_sequence': self.sequence.isChecked(), 'sequence_original': self.sequence_size.currentData(),
                 'solver_quality': self.solver_quality.currentData(),
+                'initial_focal_length': self.initial_focal.value(),
                 'smart_lens': self.smart_lens.isChecked(),
                 # Keep the legacy keys synchronized for 1.x task records.
                 'auto_focal': self.smart_lens.isChecked(),

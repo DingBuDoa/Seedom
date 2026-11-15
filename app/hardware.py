@@ -21,7 +21,7 @@ def digest(value):
 
 
 def settings_signature(options):
-    keys = ('fps', 'max_size', 'overlap', 'cuda_decode', 'camera_mode', 'use_gpu', 'input_type')
+    keys = ('fps', 'max_size', 'overlap', 'cuda_decode', 'camera_mode', 'use_gpu', 'input_type', 'initial_focal_length')
     values = {key: getattr(options, key) for key in keys}
     values['policy_version'] = POLICY_VERSION
     if options.use_gpu and options.gpu_index:
