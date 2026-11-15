@@ -445,6 +445,7 @@ void GlobalPositioner::ParameterizeVariables(Reconstruction& reconstruction) {
 
 #ifdef COLMAP_CUDA_ENABLED
   bool cuda_solver_enabled = false;
+  bool cuda_sparse_solver_enabled = false;
 
 #if (CERES_VERSION_MAJOR >= 3 ||                                \
      (CERES_VERSION_MAJOR == 2 && CERES_VERSION_MINOR >= 2)) && \
@@ -473,13 +474,14 @@ void GlobalPositioner::ParameterizeVariables(Reconstruction& reconstruction) {
     cuda_solver_enabled = true;
     options_.solver_options.sparse_linear_algebra_library_type =
         ceres::CUDA_SPARSE;
+    cuda_sparse_solver_enabled = true;
   }
 #else
   if (options_.use_gpu) {
     LOG_FIRST_N(WARNING, 1)
-        << "Requested to use GPU for bundle adjustment, but Ceres was "
-           "compiled without cuDSS support. Falling back to CPU-based sparse "
-           "solvers.";
+        << "Ceres has no cuDSS sparse solver; large global-positioning "
+           "problems will use CPU sparse Schur, while moderate problems can "
+           "use CUDA dense Schur.";
   }
 #endif
 
@@ -501,7 +503,15 @@ void GlobalPositioner::ParameterizeVariables(Reconstruction& reconstruction) {
   // Do not use iterative solvers, for its suboptimal performance.
   // TODO: Investigate whether the direct solver should be chosen
   // adaptively based on problem scale.
-  options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+  if (cuda_sparse_solver_enabled) {
+    options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+  } else if (cuda_solver_enabled &&
+             reconstruction.NumImages() <=
+                 static_cast<size_t>(options_.max_num_images_dense_gpu_solver)) {
+    options_.solver_options.linear_solver_type = ceres::DENSE_SCHUR;
+  } else {
+    options_.solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
+  }
 }
 
 void GlobalPositioner::ConvertBackResults(Reconstruction& reconstruction) {

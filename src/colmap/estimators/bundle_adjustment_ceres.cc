@@ -135,9 +135,9 @@ ceres::Solver::Options CeresBundleAdjustmentOptions::CreateSolverOptions(
 #else
   if (use_gpu) {
     LOG_FIRST_N(WARNING, 1)
-        << "Requested to use GPU for bundle adjustment, but Ceres was "
-           "compiled without cuDSS support. Falling back to CPU-based sparse "
-           "solvers.";
+        << "Ceres has no cuDSS sparse solver; large bundle-adjustment "
+           "problems will use CPU sparse Schur, while moderate problems can "
+           "use CUDA dense Schur.";
   }
 #endif
 
@@ -442,8 +442,19 @@ void AddDynamicFocalSmoothness(const BundleAdjustmentOptions& options,
   if (groups->empty()) {
     std::vector<camera_t> group;
     group.reserve(reconstruction.Cameras().size());
+    camera_t previous_id = kInvalidCameraId;
     for (const auto& [camera_id, camera] : reconstruction.Cameras()) {
+      // Seedom reserves an id gap at a detected hard cut.  Split the
+      // regularizer there so a focal-length change is not smeared across two
+      // independent shots.  Consecutive ids remain one temporal segment.
+      if (!group.empty() && camera_id != previous_id + 1) {
+        if (group.size() >= 2) {
+          automatic_groups.push_back(std::move(group));
+        }
+        group.clear();
+      }
       group.push_back(camera_id);
+      previous_id = camera_id;
     }
     if (group.size() >= 2) {
       automatic_groups.push_back(std::move(group));

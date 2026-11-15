@@ -36,6 +36,10 @@ struct GlobalPositionerOptions {
   bool use_gpu = true;
   std::string gpu_index = "-1";
   int min_num_images_gpu_solver = 50;
+  // Ceres 2.2 provides CUDA dense Schur but not cuDSS sparse Schur. Keep
+  // moderate global-positioning problems on the CUDA dense path and use the
+  // CPU sparse path for larger problems where a dense system is too costly.
+  int max_num_images_dense_gpu_solver = 500;
 
   // Constrain the minimum number of views per track
   int min_num_view_per_track = 3;

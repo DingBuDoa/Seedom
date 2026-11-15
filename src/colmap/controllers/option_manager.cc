@@ -951,6 +951,15 @@ void OptionManager::AddGlobalMapperOptions() {
       "GlobalMapper.ba_refine_focal_length",
       &global_mapper->mapper.bundle_adjustment.refine_focal_length);
   AddDefaultOption(
+      "GlobalMapper.ba_dynamic_focal_length",
+      &global_mapper->mapper.bundle_adjustment.dynamic_focal_length);
+  AddDefaultOption(
+      "GlobalMapper.ba_dynamic_focal_first_order_weight",
+      &global_mapper->mapper.bundle_adjustment.dynamic_focal_first_order_weight);
+  AddDefaultOption(
+      "GlobalMapper.ba_dynamic_focal_second_order_weight",
+      &global_mapper->mapper.bundle_adjustment.dynamic_focal_second_order_weight);
+  AddDefaultOption(
       "GlobalMapper.ba_refine_principal_point",
       &global_mapper->mapper.bundle_adjustment.refine_principal_point);
   AddDefaultOption(

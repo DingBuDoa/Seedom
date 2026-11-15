@@ -43,15 +43,14 @@ struct GlobalMapperOptions {
     if (options.ceres) {
       options.ceres->loss_function_type = CeresLossFunctionType::HUBER;
       options.ceres->use_gpu = true;
-      // TODO: Investigate whether disabling auto solver selection and using
-      // explicit SPARSE_SCHUR is necessary for global SfM, or if we can just
-      // rely on COLMAP's auto selection.
-      options.ceres->auto_select_solver_type = false;
+      // Let Ceres select CUDA dense Schur for moderate problems. On builds
+      // without cuDSS it will retain CPU sparse Schur for large problems.
+      options.ceres->auto_select_solver_type = true;
+      options.ceres->max_num_images_direct_dense_gpu_solver = 500;
       options.ceres->solver_options.function_tolerance = 1e-5;
       options.ceres->solver_options.gradient_tolerance = 1e-10;
       options.ceres->solver_options.parameter_tolerance = 1e-8;
       options.ceres->solver_options.max_num_iterations = 200;
-      options.ceres->solver_options.linear_solver_type = ceres::SPARSE_SCHUR;
     }
     return options;
   }();
