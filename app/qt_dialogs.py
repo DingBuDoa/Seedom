@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, QLineE
 from tracker_core import Options, Pipeline, VIDEO_EXTENSIONS
 from workload import video_info
 from blender_runtime import discover_blenders, probe_blender
-from qt_style import inset_numeric_fields
+from qt_style import inset_numeric_fields, theme_color
 from app_info import SOLVER_CHOICES
 from solver_quality import SOLVER_PROFILES, quality_note
 
@@ -68,7 +68,7 @@ class VideoInput(QPlainTextEdit):
 
 class TaskDialog(QDialog):
     def __init__(self, parent, options, job=None, paths=None, blender_records=None, blender_settings=None,
-                 name_validator=None):
+                 name_validator=None, cuda_available=None):
         super().__init__(parent)
         self.setWindowTitle('编辑任务' if job else '添加任务')
         self.resize(680, 760)
@@ -132,7 +132,16 @@ class TaskDialog(QDialog):
         self.backend = QComboBox()
         for key, text in SOLVER_CHOICES.items(): self.backend.addItem(text, key)
         self.backend.setCurrentIndex(0 if options.backend == 'fastmap' else 1)
+        # FastMap only runs on CUDA; keep the entry visible but unusable without an NVIDIA GPU.
+        self.fastmap_available = cuda_available is not False
+        if not self.fastmap_available:
+            fastmap_index = self.backend.findData('fastmap')
+            self.backend.model().item(fastmap_index).setEnabled(False)
+            self.backend.setCurrentIndex(self.backend.findData('glomap'))
+            self.backend.setToolTip('FastMap 需要 NVIDIA CUDA 显卡，本机不可用。')
         form.addRow('求解方案', self.backend)
+        if not self.fastmap_available:
+            form.addRow('', label('未检测到 NVIDIA 显卡：FastMap 需要 CUDA，已禁用；将使用 GLOMAP 的 CPU 解算。'))
         self.quality = QComboBox()
         for title, values in [('默认 · 沿用当前参数', None), ('高 · SIFT 4096 / 匹配 15', (4096, 15, 'high')),
                               ('中 · SIFT 2048 / 匹配 10', (2048, 10, 'balanced')), ('低 · SIFT 1024 / 匹配 5', (1024, 5, 'fast'))]:
@@ -212,6 +221,7 @@ class TaskDialog(QDialog):
         self.warnings.setChecked(bool(self.current_blender.get('suppress_warnings', defaults.get('blender_suppress_warnings', True))))
         for field in (self.points, self.mesh, self.background, self.warnings): blender_form.addRow(field)
         self.radius = QDoubleSpinBox(); self.radius.setDecimals(4); self.radius.setRange(.0001, 100)
+        self.radius.setSingleStep(0.005)          # 每次增减 0.005
         self.radius.setValue(default_point_radius({'blender_point_radius': self.current_blender.get(
             'point_radius', defaults.get('blender_point_radius', .005)),
             'blender_point_size_revision': defaults.get('blender_point_size_revision', 0)}))
@@ -252,6 +262,11 @@ class TaskDialog(QDialog):
             form.addRow(name, field)
         for field in (self.decode, self.color, self.gpu):
             form.addRow(field)
+        if not self.fastmap_available:
+            self.decode.setChecked(False); self.decode.setEnabled(False)
+            self.decode.setToolTip('CUDA 视频解码需要 NVIDIA 显卡；将使用 CPU 解码。')
+            self.gpu.setChecked(False); self.gpu.setEnabled(False)
+            self.gpu.setToolTip('未检测到 NVIDIA 显卡：GLOMAP 将使用 CPU 求解。')
         layout.addWidget(advanced)
         advanced.setVisible(False)
         self.advanced_toggle.toggled.connect(advanced.setVisible)
@@ -265,7 +280,7 @@ class TaskDialog(QDialog):
         foot = QWidget()
         fl = QVBoxLayout(foot)
         fl.setContentsMargins(24, 10, 24, 16)
-        self.error = QLabel(); self.error.setWordWrap(True); self.error.setStyleSheet('color: #d8443c;'); self.error.hide()
+        self.error = QLabel(); self.error.setWordWrap(True); self.error.setStyleSheet('color: ' + theme_color('#d8443c') + ';'); self.error.hide()
         fl.addWidget(self.error)
         row = QHBoxLayout(); row.addWidget(label('每个任务独立保存参数')); row.addStretch()
         row.addWidget(button('取消', self.reject))
@@ -461,6 +476,8 @@ class TaskDialog(QDialog):
                 'glomap_gpu': self.gpu.isChecked(), 'image_scale': self.scale.currentData(),
                 'export_sequence': self.sequence.isChecked(), 'sequence_original': self.sequence_size.currentData(),
                 'solver_quality': self.solver_quality.currentData()})
+            if options.backend == 'fastmap' and not self.fastmap_available:
+                raise ValueError('FastMap 需要 NVIDIA CUDA 显卡，本机不可用；请改用 GLOMAP。')
             Pipeline(options).preflight()
             blender = None
             if self.blend.isChecked():
@@ -518,7 +535,9 @@ class BlenderDialog(QDialog):
         self.background = QCheckBox('预览和渲染使用抽帧背景'); self.background.setChecked(settings.get('blender_background_images', True))
         self.warnings = QCheckBox('隐藏镜头畸变警告'); self.warnings.setChecked(settings.get('blender_suppress_warnings', True))
         from blender_export import default_point_radius
-        self.radius = QDoubleSpinBox(); self.radius.setDecimals(4); self.radius.setRange(.0001, 100); self.radius.setValue(default_point_radius(settings))
+        self.radius = QDoubleSpinBox(); self.radius.setDecimals(4); self.radius.setRange(.0001, 100)
+        self.radius.setSingleStep(0.005)          # 每次增减 0.005
+        self.radius.setValue(default_point_radius(settings))
         self.fps = QDoubleSpinBox(); self.fps.setDecimals(3); self.fps.setRange(.01, 240); self.fps.setValue(float(fps))
         self.frame_start_offset = QSpinBox(); self.frame_start_offset.setRange(0, 10000)
         self.frame_start_offset.setValue(int(settings.get('blender_frame_start_offset', 0)))

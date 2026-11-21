@@ -1,15 +1,51 @@
 """Shared, restrained Qt styling and small vector icons."""
-from PySide6.QtCore import QByteArray, Qt
-from PySide6.QtGui import QIcon, QPainter, QPixmap, QColor
+from PySide6.QtCore import QByteArray, QEvent, QObject, Qt
+from PySide6.QtGui import QIcon, QPainter, QPixmap, QColor, QWheelEvent
 from PySide6.QtSvg import QSvgRenderer
 from pathlib import Path
-from PySide6.QtWidgets import QAbstractSpinBox
+from PySide6.QtWidgets import (QAbstractScrollArea, QAbstractSpinBox, QApplication, QComboBox,
+                               QLineEdit)
 
 
 def inset_numeric_fields(parent):
     # Qt owns the inner editor geometry; use text margins for a stable inset.
     for control in parent.findChildren(QAbstractSpinBox):
         control.lineEdit().setTextMargins(10, 0, 0, 0)
+
+
+class _WheelGuard(QObject):
+    """Scrolling must never change a value: combos and spin boxes react to clicks only.
+
+    Wheel events over those controls are handed to the enclosing scroll area, so the
+    page still scrolls where the cursor happens to rest on a dropdown.
+    """
+
+    def eventFilter(self, watched, event):
+        target = watched
+        if isinstance(watched, QLineEdit) and isinstance(watched.parentWidget(), QAbstractSpinBox):
+            target = watched.parentWidget()          # the spin box's own editor covers most of it
+        if not isinstance(target, (QComboBox, QAbstractSpinBox)):
+            return False
+        if event.type() != QEvent.Type.Wheel or event.modifiers() != Qt.KeyboardModifier.NoModifier:
+            return False
+        area = target.parentWidget()
+        while area is not None and not isinstance(area, QAbstractScrollArea):
+            area = area.parentWidget()
+        if area is not None:
+            QApplication.sendEvent(area.viewport(), QWheelEvent(event))
+        return True
+
+
+_WHEEL_GUARD = None
+
+
+def install_wheel_guard(app):
+    """Keep the application-wide wheel guard alive for the whole session."""
+    global _WHEEL_GUARD
+    if _WHEEL_GUARD is None:
+        _WHEEL_GUARD = _WheelGuard(app)
+        app.installEventFilter(_WHEEL_GUARD)
+    return _WHEEL_GUARD
 
 
 LIGHT_STYLE = '''
@@ -75,6 +111,7 @@ QTableView::item { border: none; padding: 0 12px; }
 QTableView::item:selected { background: #eaf0ff; }
 QHeaderView::section { background: #fafbfc; color: #89929f; font-size: 12px; font-weight: 400; border: none; border-bottom: 1px solid #e3e5e9; padding: 11px 12px; }
 QHeaderView { background: #fafbfc; }
+QTableCornerButton::section { background: #fafbfc; border: none; border-bottom: 1px solid #e3e5e9; }
 QGroupBox { background: white; border: 1px solid #e3e5e9; border-radius: 6px; margin-top: 12px; padding: 16px; }
 QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 5px; font-weight: 600; }
 QCheckBox { spacing: 8px; padding: 5px 0; }
@@ -83,6 +120,10 @@ QProgressBar { border: 0; border-radius: 2px; background: #e6e9ef; max-height: 4
 QProgressBar::chunk { background: #2f6bff; border-radius: 2px; }
 QProgressBar#updateProgress { min-height: 8px; max-height: 8px; }
 QScrollArea { background: transparent; border: none; }
+/* QScrollArea::setWidget() turns on the scroll body's autoFillBackground, so an
+   unstyled body paints the palette window colour and shows a light band inside
+   dark surfaces. Keep the body transparent; longer ID selectors still win. */
+QScrollArea > QWidget > QWidget { background: transparent; }
 QScrollBar:vertical { background: #f5f6f8; width: 9px; margin: 0; }
 QScrollBar::handle:vertical { background: #ced3dc; min-height: 30px; border-radius: 4px; }
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
@@ -94,6 +135,7 @@ QMenu { background: white; border: 1px solid #e3e5e9; padding: 5px; }
 QMenu::item { padding: 8px 24px 8px 12px; border-radius: 4px; }
 QMenu::item:selected { background: #eaf0ff; }
 QMenu::item:disabled { color: #b4bac4; }
+QMenu::separator { height: 1px; background: #e3e5e9; margin: 5px 8px; }
 QToolTip { background: #1c1f26; color: white; padding: 6px; border: none; }
 QStatusBar { background: white; border-top: 1px solid #e3e5e9; color: #626a76; }
 QDialogButtonBox { background: transparent; }
@@ -141,17 +183,6 @@ _DARK_COLORS = {
 }
 
 
-def _style_suffix():
-    style = 'QComboBox::down-arrow { image: url("' + (Path(__file__).parent / 'icons/chevron.svg').as_posix() + '"); width: 10px; height: 6px; }'
-    for control in ('QSpinBox', 'QDoubleSpinBox'):
-        style += f'{control} {{ padding-right: 24px; }}'
-        for direction, position, name in (('up', 'top', 'chevron-up.svg'), ('down', 'bottom', 'chevron.svg')):
-            style += f'{control}::{direction}-button {{ subcontrol-origin: border; subcontrol-position: {position} right; width: 22px; border: none; }}'
-            style += f'{control}::{direction}-arrow {{ image: url("' + (Path(__file__).parent / 'icons' / name).as_posix() + '"); width: 8px; height: 5px; }'
-    return style
-
-
-STYLE = LIGHT_STYLE + _style_suffix()
 _ACTIVE_THEME = 'light'
 
 
@@ -162,6 +193,40 @@ def set_active_theme(theme):
 
 def theme_color(value):
     return _DARK_COLORS.get(value.lower(), value) if _ACTIVE_THEME == 'dark' else value
+
+
+def _style_suffix():
+    icons = Path(__file__).parent / 'icons'
+    style = 'QComboBox::down-arrow { image: url("' + (icons / 'chevron.svg').as_posix() + '"); width: 10px; height: 6px; }'
+    for control in ('QSpinBox', 'QDoubleSpinBox'):
+        style += f'{control} {{ padding-right: 24px; }}'
+        for direction, position, name in (('up', 'top', 'chevron-up.svg'), ('down', 'bottom', 'chevron.svg')):
+            style += f'{control}::{direction}-button {{ subcontrol-origin: border; subcontrol-position: {position} right; width: 22px; border: none; background: transparent; }}'
+            style += f'{control}::{direction}-arrow {{ image: url("' + (icons / name).as_posix() + '"); width: 8px; height: 5px; }'
+    # Check and radio indicators are painted from the palette when unstyled, which
+    # stays light in dark mode. Style them for the dark theme only, so the light
+    # theme keeps its native indicators.
+    style += 'QComboBox::drop-down { background: transparent; }'
+    if _ACTIVE_THEME == 'dark':
+        border = theme_color('#d3d6dc')
+        field = theme_color('#ffffff')
+        accent = theme_color('#2f6bff')
+        disabled = theme_color('#fafbfc')
+        tick = (icons / 'check-dark.svg').as_posix()
+        style += (f'QCheckBox::indicator, QRadioButton::indicator {{ width: 15px; height: 15px;'
+                  f' border: 1px solid {border}; border-radius: 4px; background: {field}; }}')
+        style += f'QCheckBox::indicator:hover, QRadioButton::indicator:hover {{ border-color: {accent}; }}'
+        style += (f'QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent};'
+                  f' image: url("{tick}"); }}')
+        style += f'QCheckBox::indicator:checked:disabled {{ background: {disabled}; border-color: {border}; }}'
+        style += (f'QCheckBox::indicator:disabled, QRadioButton::indicator:disabled'
+                  f' {{ background: {disabled}; border-color: {border}; }}')
+        style += 'QRadioButton::indicator { border-radius: 8px; }'
+        style += f'QRadioButton::indicator:checked {{ background: {accent}; border-color: {accent}; }}'
+    return style
+
+
+STYLE = LIGHT_STYLE + _style_suffix()
 
 
 def style_for_theme(theme):
@@ -206,7 +271,8 @@ PATHS = {
 }
 
 
-def icon(name, color='#697382'):
+def icon(name, color=None):
+    color = color or theme_color('#697382')
     path = PATHS.get(name, PATHS['tasks'])
     svg = f'<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round">{path}</svg>'
     renderer = QSvgRenderer(QByteArray(svg.encode()))

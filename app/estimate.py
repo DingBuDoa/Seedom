@@ -69,9 +69,17 @@ def duration_text(seconds):
     return f'{max(5, math.ceil(seconds/5)*5)} 秒'
 
 
+def effective_backend(options, hardware):
+    """The solver that will really run: FastMap is CUDA-only, GLOMap falls back to CPU."""
+    if options.backend == 'fastmap':
+        return 'fastmap'
+    usable = hardware.get('cuda_usable') if hardware else True
+    return 'glomap-gpu' if options.glomap_gpu and usable is not False else 'glomap-cpu'
+
+
 def prediction_range(workload, options, hardware, samples=None):
     """Structured task duration, shared by queue previews and live countdowns."""
-    backend = 'fastmap' if options.backend == 'fastmap' else ('glomap-gpu' if options.glomap_gpu else 'glomap-cpu')
+    backend = effective_backend(options, hardware)
     settings = settings_signature(options)
     samples = read_samples() if samples is None else samples
     matching = [sample for sample in samples if comparable(
@@ -88,7 +96,7 @@ def prediction_range(workload, options, hardware, samples=None):
 def phase_prediction_ranges(workload, options, hardware, samples=None):
     """Reuse solver timings independently of decoding, outputs and cache state."""
     from task_progress import FASTMAP_STAGES, GLOMAP_STAGES
-    backend = 'fastmap' if options.backend == 'fastmap' else ('glomap-gpu' if options.glomap_gpu else 'glomap-cpu')
+    backend = effective_backend(options, hardware)
     settings = settings_signature(options)
     ignored = {'fps', 'cuda_decode', 'export_sequence', 'sequence_original'}
     solver_settings = {key: value for key, value in settings.items() if key not in ignored}
@@ -133,8 +141,8 @@ def estimate_jobs(jobs, options):
     hardware = get_hardware(options.python, gpu_index=options.gpu_index)
     if not hardware.get('fingerprint'):
         return '预估任务时长：暂不可用（硬件检测未完成或失败）'
-    if not hardware.get('cuda_usable') and (options.backend == 'fastmap' or options.glomap_gpu):
-        return '预估任务时长：暂不可用（CUDA 实算未通过，请检查运行环境）'
+    if not hardware.get('cuda_usable') and options.backend == 'fastmap':
+        return '预估任务时长：暂不可用（FastMap 需要 NVIDIA CUDA 显卡）'
     samples = read_samples()
     lower, upper, unknown, unreadable, least_samples = 0.0, 0.0, 0, 0, 5
     for job in jobs:

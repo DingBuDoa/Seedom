@@ -35,7 +35,7 @@ from task_queue import TaskQueue, MOVABLE_STATES
 from qt_dialogs import TaskDialog, BlenderDialog, button, label
 from blender_runtime import discover_blenders, probe_blender
 from qt_style import (STYLE, icon, inset_numeric_fields, style_for_theme,
-                      detect_system_theme, theme_color)
+                      detect_system_theme, theme_color, install_wheel_guard)
 from qt_updates import UpdatePanel
 from app_info import APP_NAME, APP_VERSION, SOLVER_CHOICES
 from json_store import atomic_write_json
@@ -131,6 +131,14 @@ def output_size(size):
     return f'{size} B'
 
 
+def theme_icon(target, name, color=None):
+    """Set an icon and remember it, so a live theme switch can rebuild it."""
+    target.setProperty('themeIconName', name)
+    target.setProperty('themeIconColor', color or '')
+    target.setIcon(icon(name, theme_color(color) if color else None))
+    return target
+
+
 def row_actions(row):
     pending = row['state'] in ('等待', '排队', '失败', '已停止') and row.get('queued')
     return [('edit', '编辑任务参数' if pending else '重命名', bool(pending or row.get('record') and not row['busy'])),
@@ -142,7 +150,7 @@ def row_actions(row):
 
 
 class TaskModel(QAbstractTableModel):
-    headings = ['任务 / 素材', '求解方案', '处理设置', '输出大小', '创建时间', '状态 / 阶段', '操作']
+    headings = ['任务 / 素材', '求解方案', '处理设置', '占用空间', '创建时间', '状态 / 阶段', '操作']
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -168,7 +176,14 @@ class TaskModel(QAbstractTableModel):
             if col == 4: return '创建：' + (row['date'] or '旧记录未提供') + '\n完成：' + (row['result'].get('completed_at') or '尚未完成')
             if col == 3:
                 size = row.get('bytes')
-                return (f'输出大小：{output_size(size)}（{size:,} 字节）\n' if size is not None else '') + row['result'].get('model', '尚未生成点云')
+                if size is None:
+                    return row['result'].get('model', '尚未生成点云')
+                output, cache = row.get('output_bytes'), row.get('cache_bytes')
+                if output is None or cache is None:
+                    return f'占用空间：{output_size(size)}（{size:,} 字节）\n' + row['result'].get('model', '尚未生成点云')
+                return (f'占用空间：{output_size(size)}（{size:,} 字节）\n'
+                        f'输出与结果：{output_size(output)}\n'
+                        f'缓存 _cache：{output_size(cache)}\n' + row['result'].get('model', '尚未生成点云'))
             if col == 6: return '编辑 · 开始 · 输出目录 · 日志 · 移除（按任务状态启用）'
             return f"{row['name']}\n{row['path']}\n{row.get('error', '')}".strip()
         if role == SORT_ROLE:
@@ -418,6 +433,7 @@ class MainWindow(QMainWindow):
         self.blender_discovery_running = False
         self.active_task_dialog = None
         self.environment_generation = 0
+        self.hardware_profile = {}
         known = {f.name for f in fields(Options)}
         values = {key: value for key, value in self.config.items() if key in known}
         settings_error = None
@@ -489,7 +505,7 @@ class MainWindow(QMainWindow):
         brand.addLayout(names); brand.addStretch(); sl.addLayout(brand); sl.addSpacing(25)
         self.pages = QStackedWidget(); self.nav_group = QButtonGroup(self)
         for i, (text, name) in enumerate((('任务', 'tasks'), ('设置', 'settings'), ('关于', 'about'))):
-            nav = QPushButton('  ' + text); nav.setIcon(icon(name)); nav.setIconSize(QSize(17, 17)); nav.setObjectName('nav'); nav.setCheckable(True)
+            nav = QPushButton('  ' + text); theme_icon(nav, name); nav.setIconSize(QSize(17, 17)); nav.setObjectName('nav'); nav.setCheckable(True)
             self.nav_group.addButton(nav, i); sl.addWidget(nav)
         self.settings_dirty = False
         self.nav_group.idClicked.connect(self.navigate_page)
@@ -526,13 +542,13 @@ class MainWindow(QMainWindow):
         top = QHBoxLayout(); titles = QVBoxLayout(); titles.setSpacing(4)
         titles.addWidget(label('任务工作区', 'title')); self.summary_label = label('统一管理重建任务、点云与 Blender 场景'); titles.addWidget(self.summary_label)
         top.addLayout(titles, 1)
-        self.add_button = button('添加任务', self.add_task, True); self.add_button.setIcon(icon('plus', 'white')); top.addWidget(self.add_button)
+        self.add_button = button('添加任务', self.add_task, True); theme_icon(self.add_button, 'plus', '#ffffff'); top.addWidget(self.add_button)
         hl.addLayout(top)
         tools = QHBoxLayout(); tools.setSpacing(8)
-        self.start_button = button('开始队列', self.start_queue, True); self.start_button.setObjectName('startQueue'); self.start_button.setIcon(icon('play', 'white')); self.start_button.setMinimumWidth(118); self.start_button.setFixedHeight(36); tools.addWidget(self.start_button)
+        self.start_button = button('开始队列', self.start_queue, True); self.start_button.setObjectName('startQueue'); theme_icon(self.start_button, 'play', '#ffffff'); self.start_button.setMinimumWidth(118); self.start_button.setFixedHeight(36); tools.addWidget(self.start_button)
         self.start_button.setToolTip('按执行顺序依次处理全部待执行任务')
-        self.pause_button = button('暂停队列', self.toggle_pause); self.pause_button.setIcon(icon('pause')); tools.addWidget(self.pause_button)
-        self.stop_button = button('停止', self.stop); self.stop_button.setIcon(icon('stop')); tools.addWidget(self.stop_button)
+        self.pause_button = button('暂停队列', self.toggle_pause); theme_icon(self.pause_button, 'pause'); tools.addWidget(self.pause_button)
+        self.stop_button = button('停止', self.stop); theme_icon(self.stop_button, 'stop'); tools.addWidget(self.stop_button)
         saved_power_action = self.config.get('queue_power_action', 'shutdown')
         self.auto_poweroff = QCheckBox(f'完成任务后：{power_action_label(saved_power_action)}')
         self.auto_poweroff.setChecked(self.config.get('auto_poweroff_after_queue') is True)
@@ -544,6 +560,7 @@ class MainWindow(QMainWindow):
         self.search = QLineEdit(); self.search.setPlaceholderText('搜索任务名称、素材或求解方案'); self.search.setClearButtonEnabled(True); self.search.setMaximumWidth(300)
         self.search.setObjectName('taskSearch'); self.search.setFixedHeight(34)
         self.search.addAction(icon('search'), QLineEdit.ActionPosition.LeadingPosition)
+        theme_icon(self.search.actions()[0], 'search')
         self.search.textChanged.connect(self.apply_filter); filters.addWidget(self.search, 1)
         segments = QWidget(); segments.setObjectName('segments'); seg = QHBoxLayout(segments); seg.setContentsMargins(3, 3, 3, 3); seg.setSpacing(1)
         segments.setFixedHeight(34)
@@ -557,17 +574,17 @@ class MainWindow(QMainWindow):
         self.sort_box = QComboBox(); self.sort_box.setObjectName('sortBox'); self.sort_box.setFixedSize(148, 34); self.sort_box.setToolTip('任务排序')
         self.sort_box.setPlaceholderText('按表头排序')
         for title, column, order in [('执行顺序', -1, Qt.SortOrder.AscendingOrder), ('最新创建', 4, Qt.SortOrder.DescendingOrder), ('最早创建', 4, Qt.SortOrder.AscendingOrder),
-                ('名称 A → Z', 0, Qt.SortOrder.AscendingOrder), ('输出大小', 3, Qt.SortOrder.DescendingOrder)]:
+                ('名称 A → Z', 0, Qt.SortOrder.AscendingOrder), ('占用空间', 3, Qt.SortOrder.DescendingOrder)]:
             self.sort_box.addItem(title, (column, order))
         self.sort_box.setCurrentIndex(0)
         self.sort_box.currentIndexChanged.connect(self.apply_sort); right_tools.addWidget(self.sort_box); right_tools.addSpacing(6)
         self.priority_up = button('', lambda: self.move_selected(-1)); self.priority_down = button('', lambda: self.move_selected(1))
         for control, direction, title in ((self.priority_up, 'up', '上移选中任务，提高执行优先级'),
                                           (self.priority_down, 'down', '下移选中任务，降低执行优先级')):
-            control.setObjectName('iconButton'); control.setIcon(icon(direction)); control.setFixedSize(34, 34)
+            control.setObjectName('iconButton'); theme_icon(control, direction); control.setFixedSize(34, 34)
             control.setToolTip(title + '；自动切换到执行顺序'); control.setEnabled(False); right_tools.addWidget(control)
-        self.refresh_button = button('', self.refresh_projects); self.refresh_button.setObjectName('iconButton'); self.refresh_button.setIcon(icon('refresh')); self.refresh_button.setToolTip('刷新历史结果'); self.refresh_button.setFixedSize(36, 34); right_tools.addWidget(self.refresh_button)
-        more = button('', lambda: None); more.setObjectName('iconButton'); more.setIcon(icon('more')); more.setFixedSize(36, 34); more.setToolTip('工作区操作')
+        self.refresh_button = button('', self.refresh_projects); self.refresh_button.setObjectName('iconButton'); theme_icon(self.refresh_button, 'refresh'); self.refresh_button.setToolTip('刷新历史结果'); self.refresh_button.setFixedSize(36, 34); right_tools.addWidget(self.refresh_button)
+        more = button('', lambda: None); more.setObjectName('iconButton'); theme_icon(more, 'more'); more.setFixedSize(36, 34); more.setToolTip('工作区操作')
         menu = QMenu(more); menu.addAction('添加已有项目目录…', self.import_projects); menu.addAction('打开默认输出目录', lambda: self.open_path(self.defaults.output_root)); menu.addAction('运行日志…', self.open_logs)
         more.setMenu(menu); right_tools.addWidget(more); filters.addLayout(right_tools); hl.addLayout(filters); layout.addWidget(header)
         self.banner = label('', 'banner'); self.banner.hide(); layout.addWidget(self.banner)
@@ -636,8 +653,8 @@ class MainWindow(QMainWindow):
         row.addWidget(self.detail_title)
         self.detail_status = label('未选择', 'detailStatus'); row.addWidget(self.detail_status)
         row.addStretch(1)
-        self.edit_button = button('编辑参数', self.edit_task); self.edit_button.setIcon(icon('edit')); row.addWidget(self.edit_button)
-        self.result_button = button('打开输出目录', self.open_result); self.result_button.setIcon(icon('folder')); row.addWidget(self.result_button)
+        self.edit_button = button('编辑参数', self.edit_task); theme_icon(self.edit_button, 'edit'); row.addWidget(self.edit_button)
+        self.result_button = button('打开输出目录', self.open_result); theme_icon(self.result_button, 'folder'); row.addWidget(self.result_button)
         self.blend_button = button('生成 Blender 文件…', self.export_selected); row.addWidget(self.blend_button)
         self.remove_button = button('移除任务', self.remove_selected); self.remove_button.setObjectName('danger'); row.addWidget(self.remove_button)
         self.more_button = button('更多', lambda: None); self.more_button.setMenu(self.selection_menu()); self.more_button.hide()
@@ -720,7 +737,9 @@ class MainWindow(QMainWindow):
         self.gpu_choice.addItem(f'GPU {self.defaults.gpu_index}（等待检测）', self.defaults.gpu_index)
         self.default_controls['gpu_index'] = self.gpu_choice
         form.addRow('处理显卡', self.gpu_choice)
-        form.addRow(label('选择用于视频 CUDA 解码、特征提取、匹配及 FastMap / GLOMap GPU 求解的 NVIDIA 显卡。保存后用于新建任务，每个任务使用一块显卡。'))
+        self.gpu_hint = label('选择用于视频 CUDA 解码、特征提取、匹配及 FastMap / GLOMap GPU 求解的 NVIDIA 显卡。保存后用于新建任务，每个任务使用一块显卡。')
+        self.gpu_hint.setWordWrap(True)
+        form.addRow(self.gpu_hint)
         self.gpu_choice.currentIndexChanged.connect(self.check_environment)
         self.reuse_failed_projects = QCheckBox('失败任务重试时复用原项目目录')
         self.reuse_failed_projects.setChecked(self.tasks.reuse_failed_projects)
@@ -789,9 +808,18 @@ class MainWindow(QMainWindow):
         mode = self.theme_choice.currentData() if hasattr(self, 'theme_choice') else self._theme_mode
         return detect_system_theme(QApplication.instance()) if mode == 'auto' else mode
 
+    def refresh_theme_icons(self):
+        for target in [*self.findChildren(QPushButton), *self.findChildren(QAction)]:
+            name = target.property('themeIconName')
+            if not name:
+                continue
+            token = target.property('themeIconColor') or None
+            target.setIcon(icon(name, theme_color(token) if token else None))
+
     def apply_theme(self):
         app = QApplication.instance()
         app.setStyleSheet(style_for_theme(self.selected_theme()))
+        self.refresh_theme_icons()
         if hasattr(self, 'table'):
             delegate = self.table.itemDelegate()
             if hasattr(delegate, 'refresh_theme'):
@@ -935,10 +963,16 @@ class MainWindow(QMainWindow):
             result = job.get('result', {}); record = records_by_model.get(str(Path(result['model']).resolve())) if result.get('model') else None
             if record: seen.add(record['id'])
             options = job['options']; backend = options['backend']
-            if backend == 'glomap': backend = 'glomap-gpu' if options['glomap_gpu'] else 'glomap-cpu'
+            if backend == 'glomap':
+                # Show what will really run: GLOMap falls back to CPU without a CUDA device.
+                cuda = self.hardware_profile.get('cuda_usable') is not False
+                backend = 'glomap-gpu' if options['glomap_gpu'] and cuda else 'glomap-cpu'
             row = {**job, 'result': result, 'record': record, 'exports': record['exports'] if record else [],
                    'date': job.get('created_at', '') or (record.get('created', '') if record else result.get('completed_at', '')), 'solver': backend,
-                   'bytes': record.get('bytes') if record else None, 'queued': True, 'queue_position': positions.get(iid)}
+                   'bytes': record.get('bytes') if record else None,
+                   'output_bytes': record.get('output_bytes') if record else None,
+                   'cache_bytes': record.get('cache_bytes') if record else None,
+                   'queued': True, 'queue_position': positions.get(iid)}
             if record: row['name'] = record['name']
             if row['state'] == '完成' and not (record['ready'] if record else model_ready(result)):
                 row['state'] = '文件不完整'
@@ -954,7 +988,8 @@ class MainWindow(QMainWindow):
             rows.append(dict(id=record['id'], name=record['name'], path=record['source'], result=result,
                 record=record, state='完成' if record['ready'] else '文件不完整', exports=record['exports'],
                 date=record.get('created', record['completed']), solver=result.get('backend', '未知'),
-                bytes=record.get('bytes'), queued=False,
+                bytes=record.get('bytes'), output_bytes=record.get('output_bytes'),
+                cache_bytes=record.get('cache_bytes'), queued=False,
                 settings=(f'{fps:g} fps' if fps else '原始帧率') + f" / {settings.get('image_scale', 1):g}×"))
         rows.sort(key=lambda row: 0 if row['state'] == '运行中' else
                   1 if row.get('queued') and row['state'] in MOVABLE_STATES else 2)
@@ -1172,7 +1207,8 @@ class MainWindow(QMainWindow):
         self.ensure_blender_versions()
         dialog = TaskDialog(self, self.defaults, paths=paths,
                             blender_records=self.blender_records, blender_settings=self.config,
-                            name_validator=self.tasks.validate_names)
+                            name_validator=self.tasks.validate_names,
+                            cuda_available=self.hardware_profile.get('cuda_usable'))
         self.active_task_dialog = dialog
         try: accepted = dialog.exec() == QDialog.DialogCode.Accepted
         finally: self.active_task_dialog = None
@@ -1202,7 +1238,8 @@ class MainWindow(QMainWindow):
             self.ensure_blender_versions()
             dialog = TaskDialog(self, Options(**job['options']), job=job,
                                 blender_records=self.blender_records, blender_settings=self.config,
-                                name_validator=self.tasks.validate_names)
+                                name_validator=self.tasks.validate_names,
+                                cuda_available=self.hardware_profile.get('cuda_usable'))
             self.active_task_dialog = dialog
             try: accepted = dialog.exec() == QDialog.DialogCode.Accepted
             finally: self.active_task_dialog = None
@@ -1221,9 +1258,40 @@ class MainWindow(QMainWindow):
             if self.tasks.editing: self.tasks.end_edit()
             self.persist_tasks(); self.rebuild_rows(); self.schedule_estimate()
 
+    def startable_jobs(self, ids=None):
+        selected = set(ids) if ids is not None else set(self.tasks.jobs)
+        return [job for iid, job in self.tasks.jobs.items()
+                if iid in selected and job['state'] in ('等待', '失败', '已停止')]
+
+    def confirm_cpu_solving(self, ids=None):
+        """Warn once before a queue starts when no NVIDIA GPU is available."""
+        jobs = self.startable_jobs(ids)
+        if not jobs or self.hardware_profile.get('cuda_usable') is not False:
+            return True
+        glomap = sum(1 for job in jobs if job['options'].get('backend') != 'fastmap')
+        fastmap = len(jobs) - glomap
+        lines = ['未检测到可用的 NVIDIA GPU（CUDA）。']
+        if glomap:
+            lines.append(f'{glomap} 个 GLOMAP 任务将改用 CPU 完成特征提取、序列匹配与解算；'
+                         '耗时会明显变长，约为 GPU 的数倍到十倍。')
+        if fastmap:
+            lines.append(f'{fastmap} 个 FastMap 任务无法运行：FastMap 只支持 NVIDIA CUDA，'
+                         '启动后会立即失败，建议先在任务设置中改为 GLOMAP。')
+        lines.append('是否继续？')
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle('缺少 NVIDIA GPU')
+        box.setText('\n\n'.join(lines))
+        proceed = box.addButton('继续（CPU 解算）', QMessageBox.ButtonRole.AcceptRole)
+        box.addButton('取消', QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(proceed)
+        box.exec()
+        return box.clickedButton() is proceed
+
     def start_queue(self, ids=None):
         if self.busy: return
         if isinstance(ids, bool): ids = None
+        if not self.confirm_cpu_solving(ids): return
         if self.tasks.start(ids):
             self.active_progress = None
             self.phase_progress.hide(); self.progress_note.hide()
@@ -1493,6 +1561,8 @@ class MainWindow(QMainWindow):
     def check_environment(self):
         python = self.default_controls['python'].text()
         gpu_index = self.gpu_choice.currentData()
+        if not isinstance(gpu_index, int):
+            gpu_index = self.defaults.gpu_index
         self.environment_generation += 1
         generation = self.environment_generation
         self.environment_info.setText('正在检测运行环境…')
@@ -1510,19 +1580,40 @@ class MainWindow(QMainWindow):
 
     def update_gpu_choices(self, profile):
         selected = self.gpu_choice.currentData()
+        devices = profile.get('devices', [])
+        usable = profile.get('cuda_usable')
         self.gpu_choice.blockSignals(True)
         try:
             self.gpu_choice.clear()
-            for fallback_index, device in enumerate(profile.get('devices', [])):
-                index = device.get('index', fallback_index)
-                self.gpu_choice.addItem(f"GPU {index} · {device['name']} · {device['total_bytes'] / 2**30:.1f} GiB", index)
-            index = self.gpu_choice.findData(selected)
-            if index < 0:
-                self.gpu_choice.addItem(f'GPU {selected}（未检测到，请检查驱动或重新选择）', selected)
-                index = self.gpu_choice.count() - 1
-            self.gpu_choice.setCurrentIndex(index)
+            if not devices:
+                # Without a CUDA device there is nothing to pick; solving falls back to the CPU.
+                index = selected if isinstance(selected, int) else self.defaults.gpu_index
+                self.gpu_choice.addItem('无可用 CUDA 显卡（使用 CPU 解算）', index)
+                self.gpu_choice.setEnabled(False)
+            else:
+                self.gpu_choice.setEnabled(True)
+                for fallback_index, device in enumerate(devices):
+                    index = device.get('index', fallback_index)
+                    self.gpu_choice.addItem(f"GPU {index} · {device['name']} · {device['total_bytes'] / 2**30:.1f} GiB", index)
+                index = self.gpu_choice.findData(selected)
+                if index < 0:
+                    self.gpu_choice.addItem(f'GPU {selected}（未检测到，请检查驱动或重新选择）', selected)
+                    index = self.gpu_choice.count() - 1
+                self.gpu_choice.setCurrentIndex(index)
         finally:
             self.gpu_choice.blockSignals(False)
+        hint = getattr(self, 'gpu_hint', None)
+        if hint is None:
+            return
+        if not devices:
+            hint.setText('未检测到 NVIDIA CUDA 显卡：特征提取、序列匹配与 GLOMap 求解将使用 CPU；'
+                         'FastMap 需要 NVIDIA 显卡，无法运行。')
+        elif not usable:
+            hint.setText(f"检测到 {len(devices)} 张 NVIDIA 显卡，但 CUDA 实算未通过："
+                         f"{profile.get('error', '请检查驱动版本与运行环境。')}任务将回退到 CPU。")
+        else:
+            hint.setText(f'已检测到 {len(devices)} 张 NVIDIA 显卡。选择用于视频 CUDA 解码、特征提取、匹配及 '
+                         'FastMap / GLOMap GPU 求解的显卡；保存后用于新建任务，每个任务使用一块显卡。')
 
     def add_blender_directory(self):
         directory = QFileDialog.getExistingDirectory(self, '选择 Blender 安装目录')
@@ -1742,10 +1833,12 @@ class MainWindow(QMainWindow):
                 if event.get('generation', self.environment_generation) != self.environment_generation:
                     continue
                 if 'profile' in event:
+                    self.hardware_profile = event['profile']
                     self.update_gpu_choices(event['profile'])
                 self.hardware_label.setFullText(event['summary'])
                 self.hardware_label.setToolTip(f"{event['summary']}\n{event['text']}")
                 self.environment_info.setText(event['text']); self.schedule_estimate()
+                dirty = True      # the solver column depends on CUDA availability
             elif kind == 'estimate' and event['generation'] == self.estimate_generation and not self.busy:
                 self.estimate_label.setText(event['text']); self.estimate_label.setToolTip(event['text'])
             elif kind == 'queue_wait': self.update_busy()
@@ -1901,6 +1994,7 @@ def configure_application(app):
         for name in ('msyh.ttc', 'msyhbd.ttc', 'segoeui.ttf', 'consola.ttf'):
             QFontDatabase.addApplicationFont(str(Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Fonts' / name))
     app.setStyle('Fusion'); app.setFont(QFont('Microsoft YaHei UI', 9)); app.setStyleSheet(STYLE)
+    install_wheel_guard(app)
 
 
 if __name__ == '__main__': main()

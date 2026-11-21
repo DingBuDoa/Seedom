@@ -417,12 +417,20 @@ class Pipeline:
         self.preflight()
         o = self.options
         hardware = get_hardware(o.python, force=True, gpu_index=o.gpu_index)
-        if not any(device['index'] == o.gpu_index for device in hardware.get('devices', [])):
+        cuda_usable = bool(hardware.get('cuda_usable'))
+        available = {device['index'] for device in hardware.get('devices', [])}
+        if cuda_usable and o.gpu_index not in available:
             raise RuntimeError(f'所选 GPU {o.gpu_index} 不可用，请在设置中重新检测并选择显卡。')
-        if o.backend == 'fastmap' and not hardware.get('cuda_usable'):
-            raise RuntimeError(f'所选 GPU {o.gpu_index} 无法执行 CUDA：' + hardware.get('error', '请检查驱动与运行环境。'))
+        if o.backend == 'fastmap' and not cuda_usable:
+            raise RuntimeError('FastMap 需要 NVIDIA CUDA 显卡：' + hardware.get('error', '未检测到可用的 NVIDIA GPU。'))
+        # No CUDA device: COLMAP SIFT and the GLOMap solver run on the CPU instead.
+        gpu_features = cuda_usable
+        gpu_solver = cuda_usable and o.glomap_gpu
         self.check_cancel()
         self.emit('log', text='[硬件] ' + describe_hardware(hardware) + '\n')
+        if o.backend == 'glomap' and not cuda_usable:
+            self.emit('log', text='[提示] 未检测到可用的 NVIDIA GPU（CUDA）：特征提取、序列匹配与 GLOMap '
+                                  '求解将使用 CPU，耗时约为 GPU 的数倍到十倍。\n')
         # Metadata collection must not prevent a valid native-solver run.
         try:
             workload = describe_workload(source, o, existing_scene, self.project_dir)
@@ -461,25 +469,33 @@ class Pipeline:
             images = cache / 'images'
         database = cache / 'database.db'
         colmap = find_binary('01 GLOMAP', 'colmap.exe')
-        self.emit('stage', index=2, total=5, text='GPU 特征提取')
+        self.emit('stage', index=2, total=5, text='GPU 特征提取' if gpu_features else 'CPU 特征提取')
         shared_ready = existing_scene and database.is_file() and database_counts(database)['pairs'] > 0
         if shared_ready:
             self.emit('log', text='[复用] 已有匹配数据库；本次只执行求解和导出。\n')
         elif not ((cache / '.features-complete').exists() and database.is_file()):
-            self.command([colmap, 'feature_extractor', '--database_path', database, '--image_path', images,
-                          '--ImageReader.single_camera', '1', '--SiftExtraction.use_gpu', '1',
-                          '--SiftExtraction.gpu_index', str(o.gpu_index), '--SiftExtraction.max_image_size', str(o.max_size)], '02-features')
+            features = [colmap, 'feature_extractor', '--database_path', database, '--image_path', images,
+                        '--ImageReader.single_camera', '1',
+                        '--SiftExtraction.use_gpu', '1' if gpu_features else '0',
+                        '--SiftExtraction.max_image_size', str(o.max_size)]
+            if gpu_features:
+                features += ['--SiftExtraction.gpu_index', str(o.gpu_index)]
+            self.command(features, '02-features')
             (cache / '.features-complete').write_text('complete', encoding='utf-8')
-        self.emit('stage', index=3, total=5, text='GPU 序列匹配')
+        self.emit('stage', index=3, total=5, text='GPU 序列匹配' if gpu_features else 'CPU 序列匹配')
         if not shared_ready and not (cache / '.matching-complete').exists():
-            self.command([colmap, 'sequential_matcher', '--database_path', database,
-                          '--SiftMatching.use_gpu', '1', '--SiftMatching.gpu_index', str(o.gpu_index),
-                          '--SequentialMatching.overlap', str(o.overlap)], '03-matching')
+            matching = [colmap, 'sequential_matcher', '--database_path', database,
+                        '--SiftMatching.use_gpu', '1' if gpu_features else '0',
+                        '--SequentialMatching.overlap', str(o.overlap)]
+            if gpu_features:
+                matching += ['--SiftMatching.gpu_index', str(o.gpu_index)]
+            self.command(matching, '03-matching')
             (cache / '.matching-complete').write_text('complete', encoding='utf-8')
         counts = database_counts(database)
         if counts['images'] < 3 or counts['pairs'] < 2:
-            raise RuntimeError(f'有效图像/匹配不足：{counts}')
-        mode = 'fastmap' if o.backend == 'fastmap' else ('glomap-gpu' if o.glomap_gpu else 'glomap-cpu')
+            raise RuntimeError(f'有效图像或匹配点不足（图像 {counts["images"]}，匹配对 {counts["pairs"]}）：'
+                               '素材可能缺乏纹理、相邻画面重叠不足或分辨率过低。')
+        mode = 'fastmap' if o.backend == 'fastmap' else ('glomap-gpu' if gpu_solver else 'glomap-cpu')
         run_id = datetime.now().strftime('%Y%m%d_%H%M%S') + '_' + uuid.uuid4().hex[:6]
         result = self.project_dir / '_cache' / ('solve_' + run_id)
         self.emit('stage', index=4, total=5, text=f'{mode} 相机与点云求解')
@@ -502,12 +518,12 @@ class Pipeline:
             result.mkdir(parents=True)
             sparse = result / 'sparse'
             sparse.mkdir()
-            folder = '01 GLOMAP GPU' if o.glomap_gpu else '01 GLOMAP'
+            folder = '01 GLOMAP GPU' if gpu_solver else '01 GLOMAP'
             glomap = find_binary(folder, 'glomap.exe')
             args = [glomap, 'mapper', '--database_path', database, '--image_path', images,
                     '--output_path', sparse, '--log_to_stderr', '1']
             env = None
-            if o.glomap_gpu:
+            if gpu_solver:
                 env = {'PATH': str(glomap.parent) + os.pathsep + runtime_environment()['PATH']}
                 visible = os.environ.get('CUDA_VISIBLE_DEVICES', '').split(',')
                 selected_device = visible[o.gpu_index].strip() if len(visible) > o.gpu_index and visible[o.gpu_index].strip() else str(o.gpu_index)
@@ -518,9 +534,10 @@ class Pipeline:
                              f'--{stage}.min_num_images_gpu_solver', str(o.gpu_min_images)]
             else:
                 args += ['--GlobalPositioning.use_gpu', '0', '--BundleAdjustment.use_gpu', '0']
-                self.emit('log', text='[提示] 原版 GLOMAP：特征/匹配用 GPU，GP/BA 求解用 CPU。\n')
+                self.emit('log', text='[提示] 原版 GLOMAP：GP/BA 求解使用 CPU；特征与匹配'
+                                      + ('使用 GPU' if gpu_features else '也使用 CPU') + '。\n')
             self.command(args, '04-glomap', cwd=glomap.parent, env=env)
-            if o.glomap_gpu:
+            if gpu_solver:
                 gpu_solver_active = self.verify_glomap_gpu()
         elapsed = time.perf_counter() - started
         model = result / 'sparse/0'

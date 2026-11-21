@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrol
 from app_info import APP_NAME, APP_VERSION, BUILD_DATE, PROJECT_URL, OPEN_SOURCE_PROJECTS
 from paths import ROOT
 from qt_dialogs import label, button
+from qt_style import theme_color
 
 
 def package_version(name):
@@ -20,7 +21,7 @@ def package_version(name):
 
 
 def source_link(text, url, object_name='aboutLink'):
-    link = label(f'<a href="{escape(url, quote=True)}" style="color:#2f6bff;text-decoration:none">{escape(text)}</a>', object_name)
+    link = label(f'<a href="{escape(url, quote=True)}" style="color:{theme_color("#2f6bff")};text-decoration:none">{escape(text)}</a>', object_name)
     link.setTextFormat(Qt.TextFormat.RichText)
     link.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
     link.linkActivated.connect(lambda target: QDesktopServices.openUrl(QUrl(target)))

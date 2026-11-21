@@ -36,6 +36,36 @@ def validate_result(result):
     return result
 
 
+def tree_sizes(directory):
+    """Deliverable and disposable-cache byte counts from one walk.
+
+    _cache holds extracted frames and the solver database, which is often most of
+    the project. It is counted separately so the UI can show both numbers.
+    """
+    output = cache = 0
+    stack = [(str(directory), False)]
+    while stack:
+        current, inside_cache = stack.pop()
+        try:
+            with os.scandir(current) as entries:
+                for entry in entries:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            if not entry.is_symlink():
+                                stack.append((entry.path, inside_cache or entry.name == '_cache'))
+                        elif entry.is_file(follow_symlinks=False):
+                            size = entry.stat(follow_symlinks=False).st_size
+                            if inside_cache:
+                                cache += size
+                            else:
+                                output += size
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return output, cache
+
+
 def model_ready(result):
     if result.get('status') != 'complete' or result.get('metrics', {}).get('points', 0) <= 0:
         return False
@@ -158,15 +188,8 @@ class ProjectLibrary:
                 exports += list(directory.glob('*.blend'))
                 exports = sorted({str(path.resolve()) for path in exports if path.is_file()},
                                  key=lambda value:Path(value).stat().st_mtime, reverse=True)
-                # This scan runs off the GUI thread; never traverse the input images cache.
-                size = 0
-                for walked, subdirs, files in os.walk(directory, followlinks=False):
-                    subdirs[:] = [name for name in subdirs if name != '_cache' and not (Path(walked) / name).is_symlink()]
-                    for name in files:
-                        path = Path(walked) / name
-                        try:
-                            if not path.is_symlink(): size += path.stat().st_size
-                        except OSError: pass
+                # Count deliverables and the disposable _cache; the cache is often most of it.
+                size, cache_size = tree_sizes(directory)
                 for value in exports:
                     path = Path(value)
                     if not path.is_relative_to(directory):
@@ -180,7 +203,8 @@ class ProjectLibrary:
                                 'name':self.data['names'].get(key, result.get('name') or Path(source).stem or scene.name),
                                 'source':source, 'result':result, 'ready':model_ready(result),
                                 'exports':exports, 'completed':result.get('completed_at', ''),
-                                'created': self.data['created'].get(key, created), 'bytes': size})
+                                'created': self.data['created'].get(key, created),
+                                'bytes': size + cache_size, 'output_bytes': size, 'cache_bytes': cache_size})
             except (OSError, ValueError, KeyError, TypeError) as error:
                 warnings.append(f'{report}: {error}')
         records.sort(key=lambda record:(record['completed'], record['id']), reverse=True)
