@@ -102,6 +102,7 @@ QLineEdit:focus, QPlainTextEdit:focus, QComboBox:focus, QSpinBox:focus, QDoubleS
 QLineEdit:read-only { background: #fafbfc; color: #626a76; }
 QPlainTextEdit#recentTaskLogs { background: #fafbfc; border: 1px solid #e3e5e9; border-radius: 5px; padding: 7px; color: #4d5868; font-size: 10px; }
 QTextBrowser#updateNotes { background: transparent; border: none; color: #697382; padding: 0; }
+QTextBrowser#guideViewer { background: white; border: 1px solid #e3e5e9; border-radius: 8px; color: #28313d; }
 QComboBox:disabled, QLineEdit:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled { background: #f5f6f8; color: #a5adb9; }
 QComboBox { padding-right: 24px; }
 QComboBox::drop-down { width: 20px; border: none; }

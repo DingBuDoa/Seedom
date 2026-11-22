@@ -1,13 +1,15 @@
 """Native Qt version card and linked upstream credits, based on the HTML design."""
 from html import escape
 from importlib.metadata import PackageNotFoundError, version
+from pathlib import Path
+import re
 import sys
 
 import PySide6
 from PySide6.QtCore import Qt, QUrl, qVersion
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtGui import QDesktopServices, QIcon, QImage, QTextDocument
 from PySide6.QtWidgets import (QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QSizePolicy, QDialog, QTextBrowser, QDialogButtonBox, QMessageBox)
+    QSizePolicy, QDialog, QTextBrowser, QDialogButtonBox, QMessageBox, QFrame)
 
 from app_info import APP_NAME, APP_VERSION, BUILD_DATE, PROJECT_URL, OPEN_SOURCE_PROJECTS
 from paths import ROOT
@@ -41,17 +43,66 @@ def show_markdown_dialog(path, parent=None):
         return
     dialog = QDialog(parent)
     dialog.setWindowTitle('使用说明')
-    dialog.resize(820, 620)
+    dialog.resize(860, 640)
     layout = QVBoxLayout(dialog)
+    layout.setContentsMargins(14, 14, 14, 12)
+    layout.setSpacing(10)
     viewer = QTextBrowser(dialog)
+    viewer.setObjectName('guideViewer')
+    viewer.setFrameShape(QFrame.Shape.NoFrame)
     viewer.setOpenExternalLinks(True)
     viewer.setOpenLinks(True)
-    viewer.setMarkdown(content)
+    viewer.setSearchPaths([str(path.parent)])
+    viewer.document().setBaseUrl(QUrl.fromLocalFile(str(path.parent) + '/'))
+    viewer.document().setDocumentMargin(16)
+    viewer.document().setDefaultStyleSheet(
+        f'a {{ color: {theme_color("#2f6bff")}; text-decoration: none; }}'
+        f'code {{ color: {theme_color("#303744")}; }}')
+    viewer.setMarkdown(usable_markdown(content, path.parent))
+    if fit_images(viewer, content, path.parent, dialog.width() - 100):
+        document = viewer.document()
+        document.markContentsDirty(0, document.characterCount())
     layout.addWidget(viewer)
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, parent=dialog)
     buttons.rejected.connect(dialog.reject)
     layout.addWidget(buttons)
     dialog.exec()
+
+
+_IMAGE = re.compile(r'!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)')
+
+
+def usable_markdown(markdown, base):
+    """Drop image references that cannot resolve locally; keep remote badges."""
+    def keep(match):
+        target = match.group(1)
+        if target.startswith(('http://', 'https://', 'data:')):
+            return match.group(0)
+        candidate = Path(target) if Path(target).is_absolute() else Path(base) / target
+        return match.group(0) if candidate.is_file() else ''
+    return _IMAGE.sub(keep, markdown)
+
+
+def fit_images(viewer, markdown, base, max_width):
+    """Scale wide local images down so the guide never needs horizontal scrolling."""
+    if max_width <= 0:
+        return False
+    document = viewer.document()
+    replaced = False
+    for target in _IMAGE.findall(markdown):
+        if target.startswith(('http://', 'https://', 'data:')):
+            continue
+        path = Path(target) if Path(target).is_absolute() else Path(base) / target
+        if not path.is_file():
+            continue
+        image = QImage(str(path))
+        if image.isNull() or image.width() <= max_width:
+            continue
+        scaled = image.scaledToWidth(max_width, Qt.TransformationMode.SmoothTransformation)
+        document.addResource(QTextDocument.ResourceType.ImageResource,
+                             QUrl.fromLocalFile(str(path.resolve())), scaled)
+        replaced = True
+    return replaced
 
 
 def about_page(open_path, check_updates=None):
