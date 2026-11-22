@@ -145,7 +145,7 @@ def row_actions(row):
             ('play', '开始此任务', bool(pending and not row['busy'])),
             ('folder', '打开结果 / 输出目录', bool(row.get('directory'))),
             ('log', '查看任务日志', bool(row['result'] or row.get('scene_path'))),
-            ('trash', '移入项目回收目录' if row.get('record') else '从队列移除',
+            ('trash', '删除项目文件（移入回收站）' if row.get('record') else '从队列移除',
              bool(row.get('record') and not row['busy'] or row.get('queued') and row['state'] not in ('运行中', '排队')))]
 
 
@@ -1431,11 +1431,23 @@ class MainWindow(QMainWindow):
     def archive_selected(self):
         row = self.selected()
         if not row or not row.get('record') or self.busy: return
-        if QMessageBox.question(self, '移入项目回收目录', f"将「{row['name']}」移入输出目录的 .trash 回收文件夹？\n项目文件与缓存一并保留，原视频保留。可依据 recovery.json 恢复。") != QMessageBox.StandardButton.Yes: return
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle('删除项目文件')
+        box.setText(f"将「{row['name']}」的项目文件夹移入回收站？")
+        box.setInformativeText('项目内的点云、日志与缓存会一起删除；原视频文件不受影响，'
+                               '需要时可以从 Windows 回收站还原。')
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.button(QMessageBox.StandardButton.Yes).setText('删除')
+        box.button(QMessageBox.StandardButton.No).setText('取消')
+        box.exec()
+        if box.clickedButton() is not box.button(QMessageBox.StandardButton.Yes): return
         try:
-            destination = self.library.archive(row['record'])
+            destination = self.library.recycle(row['record'])
             if row['id'] in self.tasks.jobs: self.tasks.remove(row['id']); self.persist_tasks()
-            self.records.pop(row['record']['id'], None); self.rebuild_rows(); self.refresh_projects(); self.append_log(f'[项目回收] {destination}\n')
+            self.records.pop(row['record']['id'], None); self.rebuild_rows(); self.refresh_projects()
+            self.append_log(f'[删除] 已移入回收站：{destination}\n')
         except (ValueError, OSError) as error: self.show_error(error)
 
     def open_path(self, path):

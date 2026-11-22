@@ -10,6 +10,7 @@ import math
 from paths import CONFIG, OUTPUTS, LEGACY_OUTPUTS, saved_path, portable_path
 from project_layout import cache_directory
 from json_store import atomic_write_json
+from system_actions import send_to_recycle_bin
 
 
 def validate_result(result):
@@ -209,6 +210,17 @@ class ProjectLibrary:
                 warnings.append(f'{report}: {error}')
         records.sort(key=lambda record:(record['completed'], record['id']), reverse=True)
         return records, warnings
+
+    def recycle(self, record):
+        """Send one verified run's project folder to the Windows Recycle Bin."""
+        report = Path(record['report']).resolve()
+        if not (report.parent.name == '_cache' and report.name == 'result.json' and report.is_file()):
+            raise ValueError('项目目录无效。')
+        project = report.parent.parent
+        if project.is_symlink() or report.parent.is_symlink() or not project.is_dir():
+            raise ValueError('项目目录无效。')
+        send_to_recycle_bin([project])
+        return project
 
     def archive(self, record):
         """Move only one verified run into scene/.trash; keep source and matches."""
