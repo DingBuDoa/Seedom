@@ -249,6 +249,7 @@ class StickyActions(QWidget):
         self.setFixedWidth(self.WIDTH)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(True)
+        self.setMouseTracking(True)      # 不按键也要收到 mouseMove，提示才跟手
 
     def map_from_table(self, widget, point):
         parent_point = widget.mapTo(self.parentWidget(), point)
@@ -323,19 +324,35 @@ class StickyActions(QWidget):
             event.accept(); return
         super().mousePressEvent(event)
 
-    def mouseMoveEvent(self, event):
-        point = event.position().toPoint()
+    def action_at(self, point):
+        """Which action icon sits under this widget position: (row, name, title, enabled)."""
         viewport_y = self.y() + point.y() - self.table.viewport().geometry().top()
         row_number = self.table.rowAt(viewport_y)
-        offset = event.position().toPoint().x() - 6
-        action_index = offset // 26
-        if row_number >= 0 and 0 <= action_index < 5:
-            index = self.table.model().index(row_number, 6)
-            row = index.data(Qt.ItemDataRole.UserRole)
-            name, title, enabled = row_actions(row)[action_index]
-            self.setToolTip(title + ('' if enabled else '（当前不可用）'))
-        else:
-            self.setToolTip('')
+        if row_number < 0:
+            return None
+        action_index = (point.x() - 6) // 26
+        if not 0 <= action_index < 5:
+            return None
+        index = self.table.model().index(row_number, 6)
+        row = index.data(Qt.ItemDataRole.UserRole)
+        if row is None:
+            return None
+        name, title, enabled = row_actions(row)[action_index]
+        return row, name, title, enabled
+
+    def event(self, event):
+        if event.type() == QEvent.Type.ToolTip:
+            target = self.action_at(event.pos())
+            if target is not None:
+                suffix = '' if target[3] else '（当前不可用）'
+                QToolTip.showText(event.globalPos(), target[2] + suffix, self)
+                return True
+        return super().event(event)
+
+    def mouseMoveEvent(self, event):
+        target = self.action_at(event.position().toPoint())
+        suffix = '' if target is None or target[3] else '（当前不可用）'
+        self.setToolTip('' if target is None else target[2] + suffix)
         super().mouseMoveEvent(event)
 
 
