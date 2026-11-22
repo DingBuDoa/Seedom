@@ -250,6 +250,7 @@ class StickyActions(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
         self.setAutoFillBackground(True)
         self.setMouseTracking(True)      # 不按键也要收到 mouseMove，提示才跟手
+        self._hover = None
 
     def map_from_table(self, widget, point):
         parent_point = widget.mapTo(self.parentWidget(), point)
@@ -343,17 +344,46 @@ class StickyActions(QWidget):
     def event(self, event):
         if event.type() == QEvent.Type.ToolTip:
             target = self.action_at(event.pos())
-            if target is not None:
-                suffix = '' if target[3] else '（当前不可用）'
-                QToolTip.showText(event.globalPos(), target[2] + suffix, self)
+            text = self.tooltip_text(target)
+            if text:
+                QToolTip.showText(event.globalPos(), text, self)
+                self._hover = None if target is None else (id(target[0]), target[1])
                 return True
         return super().event(event)
 
+    @staticmethod
+    def tooltip_text(target):
+        if target is None:
+            return ''
+        return target[2] + ('' if target[3] else '（当前不可用）')
+
+    def update_hover(self, point):
+        """Show the tooltip as soon as the hovered icon changes.
+
+        Qt only delivers a ToolTip event once the pointer rests, so moving across a
+        few 26px icons would otherwise leave the user without any hint.
+        """
+        target = self.action_at(point)
+        key = None if target is None else (id(target[0]), target[1])
+        if key == self._hover:
+            return
+        self._hover = key
+        text = self.tooltip_text(target)
+        self.setToolTip(text)
+        if text:
+            QToolTip.showText(self.mapToGlobal(point), text, self)
+        else:
+            QToolTip.hideText()
+
     def mouseMoveEvent(self, event):
-        target = self.action_at(event.position().toPoint())
-        suffix = '' if target is None or target[3] else '（当前不可用）'
-        self.setToolTip('' if target is None else target[2] + suffix)
+        self.update_hover(event.position().toPoint())
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        self._hover = None
+        self.setToolTip('')
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
 
 class TaskDelegate(QStyledItemDelegate):
