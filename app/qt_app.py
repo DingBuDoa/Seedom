@@ -490,8 +490,11 @@ class MainWindow(QMainWindow):
         color_scheme_changed = getattr(QApplication.instance().styleHints(), 'colorSchemeChanged', None)
         if color_scheme_changed is not None:
             color_scheme_changed.connect(self.system_theme_changed)
+        self._settings_snapshot = None      # filled once the settings page exists
         self.restore_tasks()
         self.build()
+        self._settings_snapshot = self.settings_state()
+        self.settings_dirty = False
         self.rebuild_rows()
         self.poller = QTimer(self); self.poller.setInterval(100); self.poller.timeout.connect(self.poll); self.poller.start()
         self.estimate_timer = QTimer(self); self.estimate_timer.setSingleShot(True); self.estimate_timer.setInterval(300)
@@ -868,8 +871,27 @@ class MainWindow(QMainWindow):
                 self.restore_settings_controls()
         self.pages.setCurrentIndex(index)
 
+    def settings_state(self):
+        """Settings-page values, comparable with the state last loaded or saved."""
+        return (self.default_controls['output_root'].text().strip(),
+                self.default_controls['python'].text().strip(),
+                self.gpu_choice.currentData(),
+                self.reuse_failed_projects.isChecked(),
+                self.power_action.currentData() or 'shutdown',
+                self.theme_choice.currentData() or 'auto',
+                self.update_panel.automatic.isChecked())
+
     def mark_settings_dirty(self, *_):
-        self.settings_dirty = True
+        # Compare with the last saved/loaded state instead of latching a flag: changing
+        # a value and changing it back must not leave unsaved changes behind.
+        snapshot = self._settings_snapshot
+        if snapshot is None:
+            self.settings_dirty = True
+            return
+        try:
+            self.settings_dirty = self.settings_state() != snapshot
+        except (AttributeError, RuntimeError):
+            self.settings_dirty = True
 
     def prompt_unsaved_settings(self, message):
         dialog = QMessageBox(self)
@@ -915,6 +937,7 @@ class MainWindow(QMainWindow):
         self._theme_mode = self.theme_choice.currentData()
         self.apply_theme()
         self.settings_dirty = False
+        self._settings_snapshot = self.settings_state()
 
     def notify_update(self, version):
         self.sidebar_update.setText(f'更新至 {version}')
@@ -1931,6 +1954,7 @@ class MainWindow(QMainWindow):
             self.save_preferences()
             self.tasks.reuse_failed_projects = self.reuse_failed_projects.isChecked()
             self.settings_dirty = False
+            self._settings_snapshot = self.settings_state()
             self.settings_note.setText('设置已保存。路径、处理显卡与运行环境偏好将用于后续新建的任务。'); self.refresh_projects()
             return True
         except (OSError, ValueError) as error: self.show_error(error)
