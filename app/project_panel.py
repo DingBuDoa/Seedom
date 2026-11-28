@@ -7,9 +7,13 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 
 
 SOLVERS = {'colmap-global-cpu':'COLMAP · Global Mapper（CPU）',
+           'vggt-omega-cuda':'VGGT-Omega（CUDA）',
+           'vggt-omega-cpu':'VGGT-Omega（CPU）',
            'colmap-global-cuda':'COLMAP · Global Mapper（CUDA）',
-           'colmap-cpu':'COLMAP · Global Mapper（CPU）', 'glomap-gpu':'COLMAP · Global Mapper（旧任务）',
-           'glomap-cpu':'COLMAP · Global Mapper（旧任务）', 'glomap':'COLMAP · Global Mapper（旧任务）',
+           'glomap-cpu':'GLOMAP · 完整流程（CPU）',
+           'glomap-cuda':'GLOMAP · 完整流程（CUDA）',
+           'colmap-cpu':'COLMAP · Global Mapper（CPU）', 'glomap-gpu':'GLOMAP · 完整流程（CUDA）',
+           'glomap':'GLOMAP · 完整流程',
            'fastmap':'COLMAP · Global Mapper（旧任务已迁移）'}
 
 

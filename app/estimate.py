@@ -39,7 +39,8 @@ def comparable(sample, backend, hardware_key, settings, workload):
         return False
     if sample.get('backend') != backend or sample.get('hardware_key') != hardware_key or sample.get('settings') != settings:
         return False
-    if backend in ('fastmap', 'glomap-gpu', 'colmap-global-cuda') and sample.get('gpu_solver_active') is not True:
+    if backend in ('fastmap', 'glomap-gpu', 'glomap-cuda', 'glomap-segmented-cuda',
+                   'colmap-global-cuda', 'vggt-omega-cuda') and sample.get('gpu_solver_active') is not True:
         return False
     for key in ('frames', 'seconds'):
         if not isinstance(sample.get(key), (int, float)) or not math.isfinite(sample[key]) or sample[key] <= 0:
@@ -53,7 +54,7 @@ def comparable(sample, backend, hardware_key, settings, workload):
     ratio = workload['frames'] / sample['frames']
     if not 0.5 <= ratio <= 2:
         return False
-    if workload.get('pairs') is not None:
+    if workload.get('pairs') is not None and not backend.startswith('vggt-omega-'):
         if not isinstance(old.get('pairs'), (int, float)) or old['pairs'] <= 0:
             return False
         density_ratio = (workload['pairs'] / workload['frames']) / (old['pairs'] / sample['frames'])
@@ -71,7 +72,9 @@ def duration_text(seconds):
 
 def prediction_range(workload, options, hardware, samples=None):
     """Structured task duration, shared by queue previews and live countdowns."""
-    backend = 'colmap-global-cuda' if options.use_gpu else 'colmap-global-cpu'
+    solver_prefix = ('vggt-omega' if options.backend == 'vggt-omega' else 'glomap-segmented' if options.smart_lens else
+                     ('colmap-global' if options.backend == 'colmap' else 'glomap'))
+    backend = solver_prefix + ('-cuda' if options.use_gpu else '-cpu')
     settings = settings_signature(options)
     samples = read_samples() if samples is None else samples
     matching = [sample for sample in samples if comparable(
@@ -87,14 +90,17 @@ def prediction_range(workload, options, hardware, samples=None):
 
 def phase_prediction_ranges(workload, options, hardware, samples=None):
     """Reuse solver timings independently of decoding, outputs and cache state."""
-    backend = 'colmap-global-cuda' if options.use_gpu else 'colmap-global-cpu'
+    solver_prefix = ('vggt-omega' if options.backend == 'vggt-omega' else 'glomap-segmented' if options.smart_lens else
+                     ('colmap-global' if options.backend == 'colmap' else 'glomap'))
+    backend = solver_prefix + ('-cuda' if options.use_gpu else '-cpu')
     settings = settings_signature(options)
     ignored = {'fps', 'cuda_decode', 'export_sequence', 'sequence_original'}
     solver_settings = {key: value for key, value in settings.items() if key not in ignored}
     samples = read_samples() if samples is None else samples
     values = {}
-    from task_progress import COLMAP_STAGES
-    phases = dict(COLMAP_STAGES)
+    from task_progress import COLMAP_STAGES, GLOMAP_STAGES, VGGT_STAGES
+    phases = dict(VGGT_STAGES if options.backend == 'vggt-omega' else COLMAP_STAGES if (options.backend == 'colmap' and not options.smart_lens)
+                  else GLOMAP_STAGES)
     for sample in samples:
         if not isinstance(sample, dict) or not isinstance(sample.get('settings'), dict):
             continue

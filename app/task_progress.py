@@ -41,13 +41,24 @@ FASTMAP_TIMERS = dict(zip(
     (key for key, _ in FASTMAP_STAGES)))
 
 
+VGGT_STAGES = [('omega_load', '加载 VGGT-Omega 模型'),
+               ('omega_infer', '预测相机与深度'), ('omega_write', '保存相机与点云')]
+
+
 def stage_plan(options, blender=False):
+    if options.backend == 'vggt-omega':
+        stages = [('frames', '读取图像序列' if options.input_type == 'image_sequence' else '抽取视频帧')]
+        stages += VGGT_STAGES + [('analyze', '检查预测结果')]
+        stages.append(('publish', '整理项目与保存结果'))
+        if blender:
+            stages.append(('blender', '生成 Blender 工程'))
+        return stages
     stages = [('frames', '抽取视频帧'), ('features', '提取图像特征'), ('matching', '匹配相邻图像')]
-    solver = list(GLOMAP_STAGES if options.backend == 'glomap' else COLMAP_STAGES)
+    solver = list(COLMAP_STAGES if (getattr(options, 'backend', 'glomap') == 'colmap'
+                                    and not getattr(options, 'smart_lens', False))
+                  else GLOMAP_STAGES)
     stages += solver + [('export_txt', '导出相机与点云模型'), ('export_ply', '导出 PLY 点云'),
                         ('analyze', '检查重建结果')]
-    if options.export_sequence:
-        stages.append(('sequence', '导出视频序列帧'))
     stages.append(('publish', '整理项目与保存结果'))
     if blender:
         stages.append(('blender', '生成 Blender 工程'))
@@ -146,6 +157,7 @@ class TaskProgress:
     def command(self, label):
         key = {'01-frames': 'frames', '01-frames-cpu': 'frames', '02-features': 'features',
                '03-matching': 'matching', '04-fastmap': 'read', '04-glomap': 'read', '04-colmap': 'read',
+               '04-vggt-omega': 'omega_load',
                '05-export-model': 'export_txt', '05-export-ply': 'export_ply',
                '05-model-analysis': 'analyze', '06-video-sequence': 'sequence'}.get(label)
         if key and key != self.key:
@@ -166,6 +178,16 @@ class TaskProgress:
             if match:
                 self.begin('features' if label == '02-features' else 'matching',
                            f'{match[1]} / {match[2]} 张图像', int(match[1]), int(match[2]), 'images')
+        elif label == '04-vggt-omega' and line.startswith('[SEEDOM_VGGT] '):
+            try:
+                event = json.loads(line[len('[SEEDOM_VGGT] '):])
+                if event.get('phase') in dict(VGGT_STAGES):
+                    current, total = event.get('current'), event.get('total')
+                    if type(current) is not int or type(total) is not int or total <= 0:
+                        current = total = None
+                    self.begin(event['phase'], event.get('text', ''), current, total, 'images')
+            except (ValueError, TypeError, KeyError):
+                pass
         elif label == '04-fastmap':
             self._fastmap(line)
         elif label == '04-colmap':

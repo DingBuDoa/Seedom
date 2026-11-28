@@ -42,6 +42,11 @@ RUNTIME_GLOMAP = GLOMAP / 'glomap.exe'
 RUNTIME_GLOMAP_CUDA = GLOMAP_GPU / 'glomap.exe'
 DEV_GLOMAP = ROOT.parent.parent / 'archive' / 'legacy-1.x' / 'runtime' / 'colmap' / 'glomap.exe'
 DEV_GLOMAP_CUDA = ROOT.parent.parent / 'archive' / 'legacy-1.x' / 'runtime' / 'glomap-gpu' / 'glomap.exe'
+# The standalone GLOMAP build is paired with the 3.12 COLMAP command line
+# tools that created its database schema.  Keep this path separate from the
+# current 4.x COLMAP build used by the dynamic-focal branch.
+DEV_LEGACY_COLMAP = DEV_GLOMAP.parent / 'colmap.exe'
+RUNTIME_LEGACY_COLMAP = RUNTIME / 'glomap-legacy' / 'colmap.exe'
 
 
 def use_dev_cuda_colmap():
@@ -59,11 +64,34 @@ def saved_path(value, previous_root=None):
             return ROOT / path.relative_to(Path(previous_root))
         except ValueError:
             pass
+    # A development runtime may live outside this checkout but inside the
+    # workspace (whose historical name is "GLOMAP GUI"). It is not an old
+    # installation to relocate into src/Seedom.
+    if path.exists():
+        return path
     # Older distributions persisted absolute paths without their install root.
     # Only relocate paths inside a named application directory, never media.
     for index in range(len(path.parts) - 1, -1, -1):
         if path.parts[index].casefold() in {ROOT.name.casefold(), 'glomap gui'}:
+            if Path(*path.parts[:index + 1]) in ROOT.parents:
+                return path
             return ROOT.joinpath(*path.parts[index + 1:])
+    return path
+
+
+def python_runtime_path(value, previous_root=None):
+    """Resolve Python consistently, repairing known obsolete dev defaults."""
+    path = saved_path(value, previous_root)
+    if path.is_file():
+        return path.resolve()
+    # Older queue records accidentally saved the workspace runtime relative to
+    # the checkout. Also accept the future packaged-runtime default in dev.
+    obsolete_defaults = (ROOT / 'archive/legacy-1.x/runtime/python/python.exe',
+                         ROOT / 'runtime/python/python.exe')
+    if path in obsolete_defaults and PYTHON.is_file():
+        return PYTHON.resolve()
+    # Explicit missing custom interpreters remain actionable configuration
+    # errors; never silently substitute a different Python environment.
     return path
 
 

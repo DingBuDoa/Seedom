@@ -20,34 +20,41 @@ from PySide6.QtGui import QColor, QFont, QFontMetrics, QFontDatabase, QDesktopSe
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QLineEdit, QTableView, QHeaderView, QAbstractItemView,
     QStackedWidget, QButtonGroup, QSplitter, QFormLayout, QGridLayout, QGroupBox, QScrollArea,
-    QComboBox, QCheckBox, QFileDialog, QMessageBox,
+    QComboBox, QCheckBox, QSpinBox, QFileDialog, QMessageBox,
     QMenu, QDialog, QPlainTextEdit, QProgressBar, QInputDialog, QStyledItemDelegate,
     QStyleOptionViewItem, QStyle, QSizePolicy, QToolTip, QLayout)
 
 from tracker_core import Options, Pipeline, Cancelled
 from paths import (ROOT, APP, CONFIG, LOGS, OUTPUTS, BINARY_DIRS, DEV_COLMAP,
-                   RUNTIME_COLMAP_CUDA, PYTHON, saved_path, portable_path)
+                   RUNTIME_COLMAP_CUDA, PYTHON, saved_path, portable_path, python_runtime_path)
 from project_library import ProjectLibrary, model_ready
 from project_layout import result_directory, result_report, blend_filename
 from estimate import estimate_jobs
 from hardware import get_hardware, describe_hardware, hardware_summary, system_information
 from log_management import rotate_log
 from task_queue import TaskQueue, MOVABLE_STATES
-from qt_dialogs import TaskDialog, BlenderDialog, button, label
+from qt_dialogs import TaskDialog, BlenderDialog, NoWheelComboBox, button, label
 from blender_runtime import discover_blenders, probe_blender
 from qt_style import (STYLE, icon, inset_numeric_fields, style_for_theme,
                       detect_system_theme, theme_color, apply_palette_and_titlebars)
 from qt_updates import UpdatePanel
-from app_info import APP_NAME, APP_VERSION, SOLVER_CHOICES
+from app_info import (APP_NAME, APP_VERSION, SOLVER_CHOICES, SOLVER_SELECTION_REVISION,
+                      preferred_solver)
 from json_store import atomic_write_json
 from task_storage import restore_jobs
 from task_progress import live_remaining
 from system_actions import execute_power_action, power_action_label
+from solver_quality import SOLVER_PROFILES, quality_note
 
 SORT_ROLE = Qt.ItemDataRole.UserRole + 1
-SOLVERS = {'glomap-gpu': 'COLMAP · Global Mapper（CUDA）',
-           'glomap-cpu': 'COLMAP · Global Mapper（CPU）',
-           'glomap': 'COLMAP · Global Mapper',
+SOLVERS = {'glomap-gpu': 'GLOMAP · 完整流程（CUDA）',
+           'vggt-omega-cuda': 'VGGT-Omega（CUDA）',
+           'vggt-omega-cpu': 'VGGT-Omega（CPU）',
+           'glomap-cuda': 'GLOMAP · 完整流程（CUDA）',
+           'glomap-cpu': 'GLOMAP · 完整流程（CPU）',
+           'glomap': 'GLOMAP · 完整流程',
+           'glomap-segmented-cuda': 'GLOMAP · 分段变焦（实验性 · CUDA）',
+           'glomap-segmented-cpu': 'GLOMAP · 分段变焦（实验性 · CPU）',
            'colmap-global-cpu': 'COLMAP · Global Mapper（CPU）',
            'colmap-global-cuda': 'COLMAP · Global Mapper（CUDA）',
            'colmap-cpu': 'COLMAP · Global Mapper（CPU）',
@@ -428,20 +435,17 @@ class MainWindow(QMainWindow):
         self.hardware_profile = {}
         known = {f.name for f in fields(Options)}
         values = {key: value for key, value in self.config.items() if key in known}
+        values['backend'] = preferred_solver(self.config)
         if 'smart_lens' not in values:
-            # Existing preferences keep their old meaning; a clean install
-            # gets the new recommended default through Options.
-            values['smart_lens'] = bool(values.get('auto_focal') or values.get('contains_cuts')) if ('auto_focal' in values or 'contains_cuts' in values) else True
+            # ``auto_focal`` maps to continuous zoom.  A cut-only preference
+            # must keep using the fast GLOMAP path.
+            values['smart_lens'] = bool(values.get('auto_focal'))
         settings_error = None
         try:
             self.defaults = Options(**values).validate()
             for key in ('output_root', 'python'):
-                resolved = saved_path(getattr(self.defaults, key), self.config.get('distribution_root'))
-                # Existing dev settings may still contain the future package
-                # path ``runtime/python/python.exe``. Use the verified legacy
-                # runtime until the 2.0 runtime bundle is present.
-                if key == 'python' and not Path(resolved).is_file() and PYTHON.is_file():
-                    resolved = PYTHON
+                resolver = python_runtime_path if key == 'python' else saved_path
+                resolved = resolver(getattr(self.defaults, key), self.config.get('distribution_root'))
                 setattr(self.defaults, key, str(resolved))
         except (ValueError, TypeError) as error:
             self.defaults = Options(); settings_error = str(error)
@@ -721,7 +725,7 @@ class MainWindow(QMainWindow):
     def build_settings(self):
         scroll = QScrollArea(); scroll.setWidgetResizable(True); body = QWidget(); body.setObjectName('workspace'); scroll.setWidget(body)
         self.pages.addWidget(scroll); layout = QVBoxLayout(body); layout.setContentsMargins(28, 24, 28, 24); layout.setSpacing(16)
-        layout.addWidget(label('设置', 'title')); layout.addWidget(label('管理本地运行环境、默认路径与日志。处理参数请在新建任务时设置。'))
+        layout.addWidget(label('设置', 'title')); layout.addWidget(label('管理运行环境、默认路径和全局解算参数。'))
         self.default_controls = {}
         def settings_form(title):
             group = QGroupBox(title); form = QFormLayout(group)
@@ -759,12 +763,53 @@ class MainWindow(QMainWindow):
         self.environment_info = label('使用随软件提供的独立运行环境。'); form.addRow(self.environment_info)
         form.addRow(button('重新检测运行环境', self.check_environment)); layout.addWidget(group)
         group, form = settings_form('求解默认项')
-        self.smart_lens_default = QCheckBox('新建任务默认启用智能变焦/切镜优化')
+        self.settings_solver_quality = NoWheelComboBox()
+        for key, profile in SOLVER_PROFILES.items():
+            self.settings_solver_quality.addItem(profile['title'], key)
+        quality_index = self.settings_solver_quality.findData(self.defaults.solver_quality)
+        self.settings_solver_quality.setCurrentIndex(quality_index if quality_index >= 0 else 0)
+        self.default_controls['solver_quality'] = self.settings_solver_quality
+        form.addRow('求解优化档位', self.settings_solver_quality)
+        self.settings_quality_note = label(quality_note(self.defaults.solver_quality))
+        self.settings_quality_note.setWordWrap(True)
+        form.addRow('', self.settings_quality_note)
+        self.settings_solver_quality.currentIndexChanged.connect(
+            lambda: self.settings_quality_note.setText(
+                quality_note(self.settings_solver_quality.currentData())))
+        self.settings_max_size = QSpinBox(); self.settings_max_size.setRange(256, 16384)
+        self.settings_max_size.setValue(self.defaults.max_size)
+        self.default_controls['max_size'] = self.settings_max_size
+        form.addRow('SIFT 最大尺寸', self.settings_max_size)
+        self.settings_overlap = QSpinBox(); self.settings_overlap.setRange(1, 200)
+        self.settings_overlap.setValue(self.defaults.overlap)
+        self.default_controls['overlap'] = self.settings_overlap
+        form.addRow('相邻匹配范围', self.settings_overlap)
+        self.settings_gpu_min = QSpinBox(); self.settings_gpu_min.setRange(2, 1000000)
+        self.settings_gpu_min.setValue(self.defaults.gpu_min_images)
+        self.default_controls['gpu_min_images'] = self.settings_gpu_min
+        form.addRow('GPU 最少图像', self.settings_gpu_min)
+        self.settings_camera = NoWheelComboBox()
+        self.settings_camera.addItem('自动估计畸变（默认）', 'radial')
+        self.settings_camera.addItem('近似针孔（无畸变）', 'pinhole')
+        camera_index = self.settings_camera.findData(self.defaults.camera_mode)
+        self.settings_camera.setCurrentIndex(camera_index if camera_index >= 0 else 0)
+        self.default_controls['camera_mode'] = self.settings_camera
+        form.addRow('相机模型', self.settings_camera)
+        self.settings_cuda_decode = QCheckBox('CUDA 视频解码（失败时沿用 CPU 解码回退）')
+        self.settings_cuda_decode.setChecked(self.defaults.cuda_decode)
+        self.default_controls['cuda_decode'] = self.settings_cuda_decode
+        form.addRow(self.settings_cuda_decode)
+        self.settings_color = QCheckBox('点云取色')
+        self.settings_color.setChecked(self.defaults.color)
+        self.default_controls['color'] = self.settings_color
+        form.addRow(self.settings_color)
+        form.addRow(label('这些参数作为新建任务的默认值；历史任务会继续使用其保存的参数。'))
+        self.smart_lens_default = QCheckBox('新建任务默认启用连续变焦优化（实验性）')
         self.smart_lens_default.setChecked(self.defaults.smart_lens)
-        self.smart_lens_default.setToolTip('自动识别变焦和切镜，并使用适合的相机内参优化。')
+        self.smart_lens_default.setToolTip('勾选后使用旧版 GLOMAP 分段焦距流程（实验性）；普通镜头和仅切镜视频使用标准 GLOMAP。')
         self.default_controls['smart_lens'] = self.smart_lens_default
         form.addRow(self.smart_lens_default)
-        form.addRow(label('新建任务可单独调整此选项；关闭后使用固定焦距解算。'))
+        form.addRow(label('新建任务可单独调整；仅在同一镜头连续推拉变焦时启用。'))
         layout.addWidget(group)
         self.update_panel = UpdatePanel(ROOT, automatic=self.config.get('check_updates_on_startup', True) is not False,
                                        can_install=lambda: not self.busy,
@@ -796,6 +841,7 @@ class MainWindow(QMainWindow):
             if isinstance(control, QLineEdit): control.textChanged.connect(self.mark_settings_dirty)
             elif isinstance(control, QComboBox): control.currentIndexChanged.connect(self.mark_settings_dirty)
             elif isinstance(control, QCheckBox): control.stateChanged.connect(self.mark_settings_dirty)
+            elif isinstance(control, QSpinBox): control.valueChanged.connect(self.mark_settings_dirty)
         self.reuse_failed_projects.stateChanged.connect(self.mark_settings_dirty)
         self.power_action.currentIndexChanged.connect(self.mark_settings_dirty)
         self.update_panel.automatic.stateChanged.connect(self.mark_settings_dirty)
@@ -877,9 +923,17 @@ class MainWindow(QMainWindow):
         self.power_action.blockSignals(True)
         self.update_panel.automatic.blockSignals(True)
         try:
-            self.default_controls['output_root'].setText(str(self.defaults.output_root))
-            index = self.gpu_choice.findData(self.defaults.gpu_index)
-            if index >= 0: self.gpu_choice.setCurrentIndex(index)
+            for key, control in self.default_controls.items():
+                value = getattr(self.defaults, key)
+                if isinstance(control, QLineEdit):
+                    control.setText(str(value))
+                elif isinstance(control, QComboBox):
+                    index = control.findData(value)
+                    if index >= 0: control.setCurrentIndex(index)
+                elif isinstance(control, QCheckBox):
+                    control.setChecked(bool(value))
+                elif isinstance(control, QSpinBox):
+                    control.setValue(int(value))
             self.reuse_failed_projects.setChecked(self.tasks.reuse_failed_projects)
             saved_action = self.config.get('queue_power_action', 'shutdown')
             index = self.power_action.findData(saved_action)
@@ -888,6 +942,7 @@ class MainWindow(QMainWindow):
             saved_theme = self.config.get('theme_mode', 'auto')
             index = self.theme_choice.findData(saved_theme)
             self.theme_choice.setCurrentIndex(index if index >= 0 else 0)
+            self.settings_quality_note.setText(quality_note(self.defaults.solver_quality))
         finally:
             for control in controls:
                 control.blockSignals(False)
@@ -963,7 +1018,14 @@ class MainWindow(QMainWindow):
             result = job.get('result', {}); record = records_by_model.get(str(Path(result['model']).resolve())) if result.get('model') else None
             if record: seen.add(record['id'])
             options = job['options']; backend = options['backend']
-            if backend in ('fastmap', 'glomap'): backend = 'colmap-global-cpu'
+            if backend == 'vggt-omega':
+                backend = 'vggt-omega-cuda' if options.get('use_gpu') else 'vggt-omega-cpu'
+            elif options.get('smart_lens'):
+                backend = 'glomap-segmented-cuda' if options.get('use_gpu') else 'glomap-segmented-cpu'
+            elif options.get('backend') == 'colmap':
+                backend = 'colmap-global-cuda' if options.get('use_gpu') else 'colmap-global-cpu'
+            else:
+                backend = 'glomap-cuda' if options.get('use_gpu') else 'glomap-cpu'
             row = {**job, 'result': result, 'record': record, 'exports': record['exports'] if record else [],
                    'date': job.get('created_at', '') or (record.get('created', '') if record else result.get('completed_at', '')), 'solver': backend,
                    'bytes': record.get('bytes') if record else None, 'queued': True, 'queue_position': positions.get(iid)}
@@ -1112,7 +1174,8 @@ class MainWindow(QMainWindow):
             if directory: self.output_path.setToolTip(directory)
             options = row.get('options') or {}
             params = f"{row.get('settings', '—')} · {row.get('solver', '—')}"
-            if options: params += f" · SIFT {options.get('max_size', '—')} · 匹配 {options.get('overlap', '—')}"
+            if options and options.get('backend') != 'vggt-omega':
+                params += f" · SIFT {options.get('max_size', '—')} · 匹配 {options.get('overlap', '—')}"
             self.processing_value.setFullText(params)
             exports = row.get('exports', [])
             blend_names = [Path(item if isinstance(item, str) else item.get('path', '')).name
@@ -1424,7 +1487,10 @@ class MainWindow(QMainWindow):
             blender_suppress_warnings=settings['suppress_warnings'],
             blender_background_images=settings['background_images'],
             blender_point_radius=settings['point_radius'],
-            blender_frame_start_offset=settings.get('frame_start_offset', 0))
+            blender_frame_start_offset=settings.get('frame_start_offset', 0),
+            blender_export_sequence=settings.get('export_sequence', True),
+            blender_sequence_format=settings.get('sequence_format', 'jpg'),
+            blender_sequence_resolution=settings.get('sequence_resolution', 'original'))
 
     def export_selected(self):
         row = self.selected()
@@ -1808,6 +1874,7 @@ class MainWindow(QMainWindow):
 
     def save_preferences(self):
         data = {**self.config, **asdict(self.defaults), 'distribution_root': str(ROOT)}
+        data['solver_selection_revision'] = SOLVER_SELECTION_REVISION
         data.pop('log_retention_days', None)
         data['blender_records'] = self.blender_records
         for key in ('python', 'output_root'): data[key] = portable_path(data[key])

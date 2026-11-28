@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from paths import saved_path
+from paths import saved_path, python_runtime_path
 from tracker_core import Options
 from dataclasses import asdict
 from project_library import validate_result
@@ -33,14 +33,19 @@ def restore_jobs(path, previous_root=None):
                 if key in job and not isinstance(job[key], str):
                     raise ValueError(f'无效的 {key}')
             option_data = dict(job['options'])
-            # 1.x records did not have the public smart-lens switch.  Infer it
-            # from the two retired flags instead of silently enabling it.
+            # Missing solver fields belong to old records; a new app default
+            # must never reroute a historical task to the neural model.
+            option_data.setdefault('backend', 'glomap')
+            # 1.x records did not have the continuous-zoom switch.  A retired
+            # ``auto_focal`` flag maps to the experimental segmented GLOMAP
+            # branch; a ``contains_cuts`` flag alone stays on the standard
+            # GLOMAP path because hard cuts are supported there.
             if 'smart_lens' not in option_data:
-                option_data['smart_lens'] = bool(option_data.get('auto_focal') or
-                                                 option_data.get('contains_cuts'))
+                option_data['smart_lens'] = bool(option_data.get('auto_focal'))
             options = Options(**option_data).validate()
             for key in ('python', 'output_root'):
-                setattr(options, key, str(saved_path(getattr(options, key), previous_root)))
+                resolver = python_runtime_path if key == 'python' else saved_path
+                setattr(options, key, str(resolver(getattr(options, key), previous_root)))
             job['options'] = asdict(options)
             blender = job.get('blender')
             if blender is not None:

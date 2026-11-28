@@ -34,8 +34,19 @@ QLabel#sourcePath[empty="true"] { color: #98a0ac; }
 QWidget#previewStage { background: #1b1e24; border-radius: 8px; }
 QWidget#previewOverlay { background: transparent; }
 QLabel#previewMessage { background: transparent; color: #aeb8c7; font-size: 12px; }
+QLabel#previewTime { color: #89929f; font-size: 11px; min-width: 78px; }
+QSlider#previewSeek { min-height: 18px; }
+QSlider#previewSeek::groove:horizontal { height: 4px; background: #dfe5ef; border-radius: 2px; }
+QSlider#previewSeek::sub-page:horizontal { background: #2f6bff; border-radius: 2px; }
+QSlider#previewSeek::add-page:horizontal { background: #dfe5ef; border-radius: 2px; }
+QSlider#previewSeek::handle:horizontal { width: 12px; margin: -4px 0; background: #2f6bff; border: 2px solid white; border-radius: 6px; }
 QPushButton#previewPlay { background: rgba(255,255,255,0.18); border: 1px solid rgba(255,255,255,0.65); border-radius: 27px; color: white; font-size: 22px; padding-left: 3px; }
 QPushButton#previewPlay:hover { background: rgba(255,255,255,0.30); }
+QFrame#previewInfoCard { background: white; border: 1px solid #e3e5e9; border-radius: 8px; }
+QWidget#previewInfoRow { background: transparent; min-height: 28px; }
+QLabel#previewInfoLabel { color: #89929f; font-size: 12px; padding: 0; }
+QLabel#previewInfoValue { color: #1c1f26; font-size: 12px; padding: 0; }
+QFrame#previewInfoSeparator { background: #e3e5e9; border: none; }
 QLabel#taskAcceleration { background: #eaf0ff; color: #315fc5; border-radius: 6px; padding: 9px 10px; }
 QFrame#dropZone { background: #fbfcfe; border: 1px dashed #cbd4e2; border-radius: 7px; }
 QLabel#dropIcon { background: #eaf0ff; color: #2f6bff; border-radius: 6px; font-size: 24px; font-weight: 600; }
@@ -82,10 +93,12 @@ QComboBox#sortBox::drop-down { subcontrol-origin: border; subcontrol-position: t
 QPushButton#nav { border: 1px solid transparent; background: transparent; text-align: left; padding: 10px 14px; color: #626a76; }
 QPushButton#nav:hover { background: #eff0f3; }
 QPushButton#nav:checked { background: white; border-color: #e3e5e9; color: #1c1f26; font-weight: 600; }
-QPushButton#segment { background: #f4f6f9; border: 1px solid transparent; color: #737c89; border-radius: 4px; padding: 6px 12px; min-height: 24px; }
-QPushButton#segment:hover { background: #eaf0ff; color: #315fc5; }
-QPushButton#segment:checked { background: white; border-color: #c9d8ff; color: #2f6bff; font-weight: 600; }
-QPushButton#segment:disabled { color: #a5adb9; background: #f7f8fa; }
+/* Compact segmented controls used by the task dialog and the task filters.
+   Keep the vertical geometry from the 1.x UI: the surrounding group supplies
+   the padding, while each button stays content-sized and quiet until selected. */
+QPushButton#segment { background: transparent; border: 0; color: #737c89; border-radius: 4px; padding: 0 12px; min-height: 0; }
+QPushButton#segment:checked { background: white; color: #2f6bff; }
+QPushButton#segment:disabled { color: #a5adb9; background: transparent; }
 QWidget#segments { background: #ebedf1; border-radius: 6px; }
 QLineEdit, QPlainTextEdit, QComboBox, QSpinBox, QDoubleSpinBox { background: white; border: 1px solid #d3d6dc; border-radius: 5px; padding: 7px 9px; selection-background-color: #dce6ff; selection-color: #1c1f26; }
 QLineEdit QToolButton { background: transparent; border: none; padding: 0; min-height: 0; }

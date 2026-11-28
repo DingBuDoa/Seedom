@@ -38,6 +38,11 @@ def export_blender(pipeline, result, output, settings):
         raise FileNotFoundError('缺少内置 photogrammetry_importer 插件。')
     pipeline.log_dir = Path(result['log_dir']) if result.get('log_dir') else result_directory(result) / 'blender-logs'
     pipeline.log_dir.mkdir(exist_ok=True)
+    from blender_sequence import prepare_sequence, sequence_settings
+    sequence_settings(settings)
+    plates = None
+    if settings.get('export_sequence', True) or settings.get('background_images'):
+        plates = prepare_sequence(pipeline, result, settings)
     args = [settings['path'], '--background', '--disable-autoexec', '--python-exit-code', '1',
         '--python', APP / 'blender_import.py', '--', '--model', model, '--output', output,
         '--fps', str(settings['fps']), '--as-mesh', str(int(settings['as_mesh'])),
@@ -48,8 +53,8 @@ def export_blender(pipeline, result, output, settings):
     args += ['--frame-start-offset', str(int(settings.get('frame_start_offset', 0)))]
     if result.get('rotation_only'):
         args += ['--allow-empty-points']
-    if result.get('images_dir'):
-        args += ['--images', result['images_dir']]
+    if plates:
+        args += ['--images', plates[0], '--background-map', plates[1]]
     import uuid
     label = 'blender-import-' + uuid.uuid4().hex[:6]
     if result.get('layout_version') == 2:
@@ -70,4 +75,13 @@ def export_blender(pipeline, result, output, settings):
         if callback: pipeline.callback = callback
     if not output.is_file() or not output.stat().st_size:
         raise RuntimeError(f'Blender 未生成有效文件：{output}')
+    if plates:
+        result['sequence'] = str(plates[0])
+        result['images_dir'] = str(plates[0])
+        from project_layout import result_report
+        from json_store import atomic_write_json
+        atomic_write_json(result_report(result), result)
+    if not getattr(pipeline, 'defer_cache_cleanup', False):
+        from blender_sequence import clean_solver_cache
+        clean_solver_cache(pipeline, result)
     return str(output)

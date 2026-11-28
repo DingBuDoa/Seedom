@@ -3,6 +3,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import statistics
 import sys
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -55,7 +56,7 @@ def intrinsics(camera):
 def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
                  background_images=True, point_radius=0.005, draw_points=True,
                  images_directory=None, report_path=None, frame_start_offset=0,
-                 allow_empty_points=False):
+                 allow_empty_points=False, background_map=None):
     if type(frame_start_offset) is not int or not 0 <= frame_start_offset <= 10000:
         raise ValueError('导出起始帧偏移需要是 0 到 10000 之间的整数')
     if not allow_empty_points and not as_mesh and not draw_points:
@@ -129,7 +130,17 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     previous = None
     frames = []
     projection_errors = []
-    all_ordered_images = sorted(images, key=lambda item: item['name'])
+    all_ordered_images = sorted(images, key=lambda item: [int(part) if part.isdigit() else part.casefold()
+                               for part in re.split(r'(\d+)', item['name'])])
+    # Blender's render pixel aspect cannot be animated. Preserve the original
+    # per-frame intrinsics on the scene, use a robust fixed aspect for rendering,
+    # and report the approximation separately from coordinate-conversion error.
+    fixed_aspect = statistics.median(intrinsics(cameras[image['camera']])[2] /
+                                     intrinsics(cameras[image['camera']])[3]
+                                     for image in all_ordered_images)
+    scene.render.pixel_aspect_x = max(1., 1 / fixed_aspect)
+    scene.render.pixel_aspect_y = max(1., fixed_aspect)
+    aspect_approximation_px = 0.
     source_frame_numbers = []
     for sequence, image in enumerate(all_ordered_images, 1):
         match = re.search(r'(\d+)$', Path(image['name']).stem)
@@ -140,7 +151,8 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     source_frame_duration = max(source_frame_numbers) - min(source_frame_numbers) + 1
     if background_images:
         first = all_ordered_images[0]
-        image_path = images_directory / first['name']
+        mapping = json.loads(background_map.read_text(encoding='utf-8'))['images'] if background_map else {}
+        image_path = images_directory / mapping.get(first['name'], first['name'])
         if not image_path.is_file():
             raise FileNotFoundError(f'Missing camera background: {image_path}')
         background = camera_data.background_images.new()
@@ -155,12 +167,16 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
         camera_data.show_background_images = True
     for sequence, image in enumerate(all_ordered_images, 1):
         frame = frame_numbers[sequence - 1]
+        # Evaluate at the frame being written. A view-layer update at frame 1
+        # otherwise restores frame 1's already-keyed intrinsics mid-import.
+        scene.frame_set(frame)
         frames.append(frame)
         width, height, fx, fy, cx, cy = intrinsics(cameras[image['camera']])
         scene.render.resolution_x, scene.render.resolution_y = width, height
         scene.render.resolution_percentage = 100
-        scene.render.pixel_aspect_x = 1
-        scene.render.pixel_aspect_y = fx / fy
+        effective_fy = fx / fixed_aspect
+        aspect_approximation_px = max(aspect_approximation_px,
+            max(abs(height * .1 - cy), abs(height * .9 - cy)) * abs(effective_fy / fy - 1))
         pose = Quaternion(image['q']).to_matrix().to_4x4()
         pose.translation = Vector(image['t'])
         camera.matrix_world = pose.inverted() @ conversion
@@ -171,7 +187,7 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
         previous = quaternion
         camera_data.lens = fx * 36 / width
         camera_data.shift_x = (width / 2 - cx) / width
-        camera_data.shift_y = (cy - height / 2) * (fx / fy) / width
+        camera_data.shift_y = (cy - height / 2) * fixed_aspect / width
         camera.keyframe_insert(data_path='location', frame=frame)
         camera.keyframe_insert(data_path='rotation_quaternion', frame=frame)
         for property_name in ('lens', 'shift_x', 'shift_y'):
@@ -180,7 +196,7 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
         if sequence in (1, len(all_ordered_images) // 2, len(all_ordered_images)):
             bpy.context.view_layer.update()
             projection_errors.append(camera_projection_error(scene, camera, pose,
-                                     (width, height, fx, fy, cx, cy)))
+                                     (width, height, fx, effective_fy, cx, cy)))
         if sequence == 1 or sequence % max(1, len(all_ordered_images) // 20) == 0 or sequence == len(all_ordered_images):
             progress(25 + int(50 * sequence / len(all_ordered_images)), f'正在生成相机动画：{sequence}/{len(all_ordered_images)} 帧')
 
@@ -201,6 +217,12 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     scene.frame_set(scene.frame_start)
     scene['source_model'] = str(model)
     scene['camera_parameters'] = json.dumps(cameras)
+    scene['fixed_pixel_aspect'] = fixed_aspect
+    scene['pixel_aspect_approximation_px'] = aspect_approximation_px
+    if aspect_approximation_px > .1:
+        print(f'[BLENDER_PROJECTION_NOTE] Blender uses a fixed pixel aspect; '
+              f'per-frame aspect approximation up to {aspect_approximation_px:.4f}px '
+              'on validation rays. Original intrinsics are preserved in camera_parameters.', flush=True)
     scene['registered_frames'] = len(all_ordered_images)
     scene['source_registered_frames'] = len(images)
     scene['frame_start_offset'] = frame_start_offset
@@ -228,6 +250,10 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     if background_images:
         progress(87, '正在配置预览与渲染背景合成…')
         configure_background(scene, background.image, frame_numbers[0], source_frame_duration)
+        try:
+            background.image.filepath = bpy.path.relpath(str(image_path), start=str(output.parent))
+        except ValueError:  # Exporting to another Windows drive needs an absolute path.
+            background.image.filepath = str(image_path)
     scene['native_point_display'] = int(cloud is not None)
     scene['export_language'] = bpy.context.preferences.view.language
     scene['draw_colored_points'] = draw_points
@@ -236,6 +262,7 @@ def import_model(model, output, fps, as_mesh=True, suppress_warnings=True,
     report = {'blend': str(output), 'registered_frames': len(all_ordered_images), 'points': count,
               'frame_start': scene.frame_start, 'frame_end': scene.frame_end, 'fps': fps,
               'max_ideal_projection_difference_px': maximum_error,
+              'pixel_aspect_approximation_px': aspect_approximation_px,
               'ideal_projection_validation': 'in-frame-reference-rays-v1',
               'lens_distortion_applied': False, 'as_mesh': as_mesh,
               'suppress_distortion_warnings': suppress_warnings,
@@ -266,6 +293,7 @@ if __name__ == '__main__':
     parser.add_argument('--report', type=Path)
     parser.add_argument('--frame-start-offset', type=int, default=0)
     parser.add_argument('--allow-empty-points', action='store_true')
+    parser.add_argument('--background-map', type=Path)
     arguments = parser.parse_args(sys.argv[sys.argv.index('--') + 1:])
     if not 0 < arguments.fps <= 240 or not 0 < arguments.point_radius <= 100:
         raise ValueError('FPS or point radius is outside the allowed range')
@@ -273,4 +301,4 @@ if __name__ == '__main__':
                  bool(arguments.as_mesh), bool(arguments.suppress_distortion_warnings),
                  bool(arguments.background_images), arguments.point_radius, bool(arguments.draw_points),
                  arguments.images, arguments.report, arguments.frame_start_offset,
-                 arguments.allow_empty_points)
+                 arguments.allow_empty_points, arguments.background_map)

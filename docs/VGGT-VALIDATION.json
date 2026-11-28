@@ -1,0 +1,172 @@
+{
+  "date": "2026-11-28",
+  "scope": "Seedom 2.0 development only; D:/seedom 1.3 unchanged",
+  "upstream_revision": "48b23c8ce72c9a8fcf987f0d7f43d8e4870759f6",
+  "hardware": {
+    "gpu": "NVIDIA GeForce RTX 4070 SUPER",
+    "vram_gib": 12,
+    "python": "3.13.11",
+    "torch": "2.9.1+cu130"
+  },
+  "focused_regression_tests": {
+    "file": "tests/test_vggt.py",
+    "passed": 25
+  },
+  "gpu_image_sequence": {
+    "frames": 16,
+    "points": 18432,
+    "batches": 2,
+    "resolution": 512,
+    "peak_allocated_bytes": 6915257856,
+    "task_wall_seconds": 8.780073899999934,
+    "alignment_errors": [
+      0.04484122755895374
+    ]
+  },
+  "gpu_video": {
+    "frames": 7,
+    "points": 8064,
+    "sequence_export": true
+  },
+  "cpu_smoke": {
+    "frames": 3,
+    "resolution": 256,
+    "seconds": 4.866208200000074
+  },
+  "colmap_binary_readback": {
+    "images": 16,
+    "points": 18432,
+    "reader": "COLMAP model_analyzer"
+  },
+  "blender_exports": [
+    "4.2.15 LTS",
+    "5.2.0 DLSS Preview"
+  ],
+  "blender_saved_file_readback": {
+    "version": "4.2.15 LTS",
+    "frames": 7,
+    "max_conversion_error_px": 0.00014495849609375,
+    "pixel_aspect_approximation_px": 0.2674569792524615
+  },
+  "real_worker_cancellation": "passed; no completed result or published model",
+  "source_resolution_controls": {
+    "vggt": "Task dialog hides processing resolution and redundant sequence-size selector; quality label is inference profile. Validated options decode source-size frames; frame-rate sampling remains effective.",
+    "glomap": "Processing resolution and calculation quality retained; switching back restores the selected scale.",
+    "regression": "Passed: stale half-size VGGT task submits at scale 1; video filters retain fps and omit scale; GLOMAP half-size filter remains."
+  },
+  "solver_selection_change": {
+    "default": "vggt-omega",
+    "new_task_and_cli_choices": [
+      "vggt-omega",
+      "glomap"
+    ],
+    "preferences": "Old defaults migrate once; subsequently saved supported choices are preserved.",
+    "historical_tasks": "Explicit COLMAP, GLOMAP and VGGT selections remain unchanged; missing old solver fields restore as GLOMAP.",
+    "ui_validation": "Actual development settings and task dialog verified: VGGT selected, two choices; no SIFT parameters shown in VGGT task details.",
+    "colmap_research": "Source and CPU/CUDA build directories retained; custom dynamic focal header and working-tree patch verified in backup.",
+    "source_backup": "backups/Seedom-before-VGGT-primary-20261128-092405.zip",
+    "backup_archive_integrity": "passed"
+  },
+  "python_runtime_path_fix": {
+    "cause": "Workspace directory name GLOMAP GUI was misidentified as an old install root; the external archived Python path was relocated inside src/Seedom.",
+    "saved_task_recovery": "passed on the actual saved failed task; preflight and worker launch use the same absolute interpreter",
+    "new_task_dialog": "accept_task passed with an obsolete saved Python path and real preflight (asset fixture only)",
+    "runtime_probe": "PyTorch 2.9.1+cu130 imported; CUDA available; NVIDIA GeForce RTX 4070 SUPER detected",
+    "custom_missing_runtime": "error retained with exact path; no arbitrary interpreter substitution"
+  },
+  "overlap_alignment_fix": {
+    "method": "camera-anchored-depth-scale",
+    "reproduction": "User wide-angle MOV failed at frame 97-108 with cloud-only alignment; shared poses differed by about 5 degrees and 0.26 cloud-spread units after fitting.",
+    "thresholds_unchanged": {
+      "normalized_depth_error": 0.12,
+      "overlap_rotation_degrees": 15,
+      "normalized_overlap_position_error": 0.15
+    },
+    "full_cached_video_gpu": {
+      "frames": 405,
+      "points": 249885,
+      "batches": 51,
+      "resolution": 512,
+      "window": 12,
+      "inference_and_model_export_seconds": 81.1950839000001,
+      "peak_gpu_allocated_bytes": 6915257856,
+      "max_normalized_depth_error": 0.10757713125156111,
+      "max_overlap_rotation_degrees": 0.17553373718045992,
+      "max_normalized_overlap_position_error": 0.015534672985911675,
+      "colmap_binary_readback": "passed: 405 registered images and 249885 points",
+      "quality_scope": "Completion, overlap consistency and model structure checked; no ground-truth trajectory comparison."
+    },
+    "minimal_window_gpu": {
+      "frames": 16,
+      "window": 5,
+      "overlap": 4,
+      "batches": 12,
+      "points": 18432,
+      "result": "passed; retained overlapping frames keep their exported poses"
+    },
+    "logs": [
+      "tests/artifacts/vggt-smoke/wideangle-fixed.log",
+      "tests/artifacts/vggt-smoke/wideangle-readback.log",
+      "tests/artifacts/vggt-smoke/small-window-fixed.log"
+    ]
+  },
+  "zoom_adaptive_overlap_attempt_20261128": {
+    "status": "unresolved; not a validated fix",
+    "source_frames": 446,
+    "source_sampling_fps": 30,
+    "original_failure": "First new frame 165; overlap frames 161-164; normalized depth error 0.302",
+    "adaptive_retry_full_video": "Failed joining frame 174 after larger overlap and earlier-reference retries; normalized depth error 0.452",
+    "reduced_sampling_10fps": "Also failed: 149 input frames, 55 accepted; overlap camera position error 0.223",
+    "thresholds": "unchanged: depth 0.12, camera position 0.15, camera rotation 15 degrees",
+    "focused_tests": "32 VGGT/runtime/adaptive tests passed; 14 Blender sequence tests passed separately. One combined run had a transient FFmpeg sequence export failure; the isolated sequence suite subsequently passed.",
+    "quality_scope": "Unit tests cover bounded retries, OOM handling, no skipped/duplicated exported frames and fixed exported poses. They do not demonstrate usable geometry on this video.",
+    "logs": [
+      "tests/artifacts/vggt-zoom-fixed/log/zoom-full.log",
+      "tests/artifacts/vggt-zoom-10fps/log/zoom-10fps.log"
+    ],
+    "backup": "backups/Seedom-before-vggt-zoom-overlap-20261128-100332.zip",
+    "scope": "2.0 development checkout only; no release update or GitHub upload"
+  },
+  "native_solver_regression": "mocked command-routing/output tests for GLOMAP and COLMAP; no performance rerun",
+  "limitations": [
+    "Public short clips and one 405-frame user video checked; not a ground-truth trajectory quality benchmark.",
+    "Predicted depth samples have relative scale and single-view observations.",
+    "Overlapping-window alignment has no global BA or loop closure.",
+    "Physical multi-GPU behavior not exercised on this single-GPU host; index propagation tested."
+  ],
+  "blender_output_ux": {
+    "date": "2026-11-28",
+    "focused_tests": [
+      "tests/test_vggt.py",
+      "tests/test_blender_sequence.py"
+    ],
+    "passed": 39,
+    "formats_ffmpeg_verified": [
+      "jpg",
+      "png",
+      "webp-lossless",
+      "tif"
+    ],
+    "real_blender_exports": {
+      "4.2.15": [
+        "png-half",
+        "tif-half"
+      ],
+      "5.2": [
+        "webp-half"
+      ]
+    },
+    "reopen_and_render_after_cache_cleanup": [
+      "Blender 4.2 PNG",
+      "Blender 5.2 WebP"
+    ],
+    "frame_start_offset": 30,
+    "rendered_frame": 32,
+    "plate_size": [
+      320,
+      180
+    ],
+    "cache_policy": "Heavy computation cache removed after successful solve and required exports; source/result JSON retained; failures/cancellation retain cache; no historical project cleanup",
+    "artifacts": "tests/artifacts/output-ux-smoke/"
+  }
+}

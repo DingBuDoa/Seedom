@@ -1,7 +1,7 @@
 {
   "application_name": "SeedomVFX",
-  "application_version": "1.1.0",
-  "application_build_date": "2026-10-31",
+  "application_version": "2.0.0-dev",
+  "application_build_date": "2026-11-28",
   "created": "2026-10-18T11:36:20",
   "python": "3.13.11",
   "packages": {

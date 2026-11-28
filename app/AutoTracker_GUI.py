@@ -1,4 +1,4 @@
-"""Desktop front end for the native COLMAP Global Mapper installation."""
+"""Legacy desktop front end and CLI for the shared reconstruction pipeline."""
 from pathlib import Path
 from dataclasses import asdict
 from collections import deque
@@ -16,17 +16,18 @@ from tkinter import ttk, filedialog, messagebox
 
 from tracker_core import ROOT, Options, Pipeline, Cancelled, VIDEO_EXTENSIONS, HIDE_WINDOW
 
-from paths import APP, CONFIG, LOGS, OUTPUTS, PYTHON, BINARY_DIRS, runtime_environment, saved_path, portable_path
+from paths import APP, CONFIG, LOGS, OUTPUTS, PYTHON, BINARY_DIRS, runtime_environment, saved_path, portable_path, python_runtime_path
 from estimate import estimate_jobs, save_sample
 from hardware import get_hardware, describe_hardware
 from log_management import rotate_log
 from project_library import ProjectLibrary, model_ready
 from project_panel import ProjectManagerMixin
 from blender_settings import ask_blender_settings
-from app_info import APP_NAME
+from app_info import (APP_NAME, SOLVER_CHOICES, SOLVER_TOOLTIPS, DEFAULT_SOLVER,
+                      SOLVER_SELECTION_REVISION, preferred_solver)
 
 SETTINGS = CONFIG / 'settings.json'
-BACKENDS = {'COLMAP · Global Mapper（CUDA/CPU）': 'colmap'}
+BACKENDS = {label: key for key, label in SOLVER_CHOICES.items()}
 LOG_PREVIEW_CHARS = 128 * 1024
 LOG_PREVIEW_CHUNKS = 1024
 
@@ -66,12 +67,10 @@ class App(ProjectManagerMixin, tk.Tk):
         except (OSError, ValueError):
             pass
         cfg = self.config_data
-        saved_backend = cfg.get('backend_label', 'COLMAP · Global Mapper（CUDA/CPU）')
-        if saved_backend not in BACKENDS:
-            saved_backend = 'COLMAP · Global Mapper（CUDA/CPU）'
+        saved_backend = SOLVER_CHOICES[preferred_solver(cfg)]
         self.backend = tk.StringVar(value=saved_backend)
         output_path = saved_path(cfg.get('output_root', 'outputs'), cfg.get('distribution_root'))
-        python_path = saved_path(cfg.get('python', 'runtime/python/python.exe'), cfg.get('distribution_root'))
+        python_path = python_runtime_path(cfg.get('python', str(PYTHON)), cfg.get('distribution_root'))
         self.output = tk.StringVar(value=str(output_path))
         self.python = tk.StringVar(value=str(python_path))
         self.fps = tk.StringVar(value=str(cfg.get('fps', 0)))
@@ -114,7 +113,7 @@ class App(ProjectManagerMixin, tk.Tk):
         build(self, BACKENDS)
 
     def refresh_note(self):
-        text = 'COLMAP：原生 Global Mapper；按硬件加速开关使用 CUDA 或 CPU，并支持原生动态焦距 BA。'
+        text = SOLVER_TOOLTIPS[BACKENDS[self.backend.get()]]
         self.backend_note.set(text)
         self.gpu_check.configure(state='disabled')
 
@@ -122,6 +121,7 @@ class App(ProjectManagerMixin, tk.Tk):
         if self.running:
             return
         defaults = Options()
+        self.backend.set(SOLVER_CHOICES[DEFAULT_SOLVER])
         for variable,value in [(self.fps,defaults.fps),(self.max_size,defaults.max_size),
                                (self.overlap,defaults.overlap),(self.gpu_min,defaults.gpu_min_images),
                                (self.python,str(PYTHON)),(self.blender_fps,30),
@@ -248,7 +248,8 @@ class App(ProjectManagerMixin, tk.Tk):
     def save_settings(self, options):
         data = asdict(options)
         data.update({key:value for key,value in self.config_data.items() if key.startswith('blender_')})
-        data.update(backend_label=self.backend.get(), camera_label=self.camera.get())
+        data.update(backend_label=self.backend.get(), camera_label=self.camera.get(),
+                    solver_selection_revision=SOLVER_SELECTION_REVISION)
         data['log_retention_days'] = self.config_data.get('log_retention_days',0)
         if self.config_data.get('last_video_directory'):
             data['last_video_directory'] = self.config_data['last_video_directory']
@@ -588,17 +589,19 @@ def main():
     parser = argparse.ArgumentParser(description=APP_NAME + ' GUI / shared pipeline CLI')
     parser.add_argument('--scene', type=Path)
     parser.add_argument('--video', type=Path)
-    parser.add_argument('--backend', choices=['colmap', 'glomap', 'fastmap'], default='colmap')
+    parser.add_argument('--backend', choices=list(SOLVER_CHOICES), default=DEFAULT_SOLVER)
     parser.add_argument('--cpu-glomap', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--no-color', action='store_true')
     parser.add_argument('--calibrated', action='store_true')
     parser.add_argument('--gpu-min-images', type=int, default=50)
     parser.add_argument('--image-scale', type=float, default=1.0)
-    parser.add_argument('--export-sequence', action='store_true')
-    parser.add_argument('--sequence-original', action='store_true')
+    parser.add_argument('--export-sequence', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--sequence-original', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--smoke-test', type=Path)
     parser.add_argument('--check-ui', action='store_true')
     args = parser.parse_args()
+    if args.export_sequence or args.sequence_original:
+        parser.error('序列帧已归入 Blender 导出，请在桌面界面的 Blender 导出设置中选择。')
     if args.scene or args.video:
         options = Options(backend=args.backend, glomap_gpu=False, color=not args.no_color,
                           camera_mode='calibrated' if args.calibrated else 'radial', gpu_min_images=args.gpu_min_images,

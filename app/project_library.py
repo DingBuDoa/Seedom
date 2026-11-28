@@ -148,10 +148,16 @@ class ProjectLibrary:
                     result.update(project_dir=str(directory), log_dir=str(directory / 'log'))
                     for warning in result.get('solver_warnings', []):
                         warning['log_path'] = str(directory / 'log' / Path(warning['log_path']).name)
-                    if not result.get('existing_scene'):
-                        result['images_dir'] = str(directory / '_cache/images')
+                    if not result.get('existing_scene') and result.get('input_type') != 'image_sequence':
+                        result['images_dir'] = '' if result.get('cache_cleaned') else str(directory / '_cache/images')
                 if result.get('sequence') and (directory / 'video').is_dir():
-                    result['sequence'] = str(directory / 'video')
+                    old_sequence = Path(result['sequence'])
+                    plates = directory / 'video'
+                    if old_sequence.parent.name == 'video':
+                        plates /= old_sequence.name
+                    result['sequence'] = str(plates)
+                    if (plates / 'sequence.json').is_file():
+                        result['images_dir'] = str(plates)
                 source = result.get('source', '')
                 manifest = cache_directory(scene) / 'source.json'
                 if manifest.is_file():

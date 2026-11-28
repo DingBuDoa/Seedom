@@ -1,7 +1,7 @@
 """Light workspace cards, forest-green navigation, and separate professional controls."""
 import tkinter as tk
 from tkinter import ttk
-from app_info import APP_NAME
+from app_info import APP_NAME, APP_VERSION
 
 
 BACKGROUND = '#EDF1ED'
@@ -82,7 +82,7 @@ def build(app, backends):
     tk.Label(side,text='CAMERA  /  POINT CLOUD',bg=FOREST,fg='#84998B',font=('Segoe UI',8),anchor='w').pack(fill='x',padx=24,pady=(6,28))
     nav = tk.Frame(side,bg=FOREST)
     nav.pack(fill='x',padx=14)
-    tk.Label(side,text='本地工作空间\nCOLMAP Global Mapper\n内置摄影测量导入插件',justify='left',anchor='w',bg=FOREST,fg='#91A596',font=('Microsoft YaHei UI',9)).pack(side='bottom',fill='x',padx=22,pady=24)
+    tk.Label(side,text='版本 ' + APP_VERSION,justify='left',anchor='w',bg=FOREST,fg='#91A596',font=('Microsoft YaHei UI',9)).pack(side='bottom',fill='x',padx=22,pady=24)
     shell = ttk.Frame(app,style='Shell.TFrame',padding=(20,16,20,14))
     shell.pack(side='left',fill='both',expand=True)
     status_bar = tk.Frame(shell,bg='#E3EBE2',highlightbackground='#CCD7CE',highlightthickness=1)
@@ -206,7 +206,7 @@ def build(app, backends):
                  values=['自动估计畸变（默认）','近似针孔（无畸变）']).grid(row=1,column=3,sticky='ew',padx=(0,20),pady=(4,12))
     ttk.Label(images,text='Blender FPS').grid(row=1,column=4,sticky='w',padx=(0,10),pady=(4,12))
     ttk.Entry(images,textvariable=app.blender_fps,width=9).grid(row=1,column=5,sticky='ew',pady=(4,12))
-    ttk.Label(images,text='相机模型和焦距优化由 COLMAP Global Mapper 原生处理。',style='Muted.TLabel',font=('Microsoft YaHei UI',9)).grid(row=2,column=0,columnspan=6,sticky='w')
+    ttk.Label(images,text='SIFT 与匹配参数仅用于 GLOMAP。',style='Muted.TLabel',font=('Microsoft YaHei UI',9)).grid(row=2,column=0,columnspan=6,sticky='w')
     decode = ttk.LabelFrame(advanced,text='解码与点云选项',style='Card.TLabelframe',padding=12)
     decode.pack(fill='x',pady=(0,12))
     ttk.Checkbutton(decode,text='CUDA视频解码',variable=app.cuda_decode).pack(side='left')

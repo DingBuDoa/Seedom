@@ -1,10 +1,9 @@
-"""Legacy 1.x focal-cache helper; retained only for old project compatibility.
+"""Build a temporary time-segmented camera database for dynamic focal BA.
 
-Seedom 2.x does not import or call this module.  Its COLMAP path passes the
-native dynamic-focal BundleAdjustment options directly to ``global_mapper``
-and leaves the current database schema untouched.  The implementation remains
-available only so an older 1.x task or a user script can be inspected without
-breaking imports during migration.
+The source database is never modified.  Each temporal segment gets its own
+camera record, while neighbouring segment windows overlap for context.  An
+image still belongs to exactly one camera in the derived database because
+COLMAP's schema cannot represent the same image twice safely.
 """
 
 from __future__ import annotations
@@ -112,7 +111,7 @@ def _detach_rig_metadata(db: sqlite3.Connection) -> bool:
 
 
 def prepare_auto_focal_database(database, output, report_path=None, target_frames=30,
-                                images_dir=None, detect_cuts=False):
+                                context_frames=5, images_dir=None, detect_cuts=False):
     """Create a segmented-camera database and return a JSON-compatible report.
 
     ``target_frames`` is a regularization interval, not a frame extraction
@@ -120,7 +119,10 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
     camera with the same initial intrinsics. When ``detect_cuts`` is enabled,
     conservative visual cut boundaries are used in addition to the interval.
     ``images.camera_id`` changes in the derived database and stale single-
-    camera rig/frame metadata is detached so GLOMAP can load the segments.
+    camera rig/frame metadata is detached so Global Mapper can load the
+    segments.  A 30-frame window with 5-frame context uses a 25-frame step;
+    overlapping context is used to choose stable temporal ownership boundaries,
+    but each image is assigned to one segment only.
     """
     source = Path(database).resolve()
     destination = Path(output).resolve()
@@ -132,12 +134,18 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
         target_frames = max(5, int(target_frames))
     except (TypeError, ValueError):
         target_frames = 30
+    try:
+        context_frames = max(0, min(int(context_frames), target_frames - 1))
+    except (TypeError, ValueError):
+        context_frames = 5
 
     _copy_database(source, destination)
     report = {
         'source': str(source),
         'database': str(destination),
         'target_frames': target_frames,
+        'context_frames': context_frames,
+        'segment_step': max(1, target_frames - context_frames),
         'segments': [],
         'images': 0,
         'cameras_before': 0,
@@ -152,11 +160,27 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
         # cannot describe the cloned cameras created below, so detach it
         # before GLOMAP loads the derived database.
         report['rig_metadata_detached'] = _detach_rig_metadata(db)
+        camera_columns = {row[1] for row in db.execute('PRAGMA table_info(cameras)')}
+        # COLMAP 3.x used prior_focal_length.  Newer COLMAP builds store the
+        # calibration origin in source instead. Preserve whichever column the
+        # source database actually provides when cloning cameras.
+        if 'prior_focal_length' in camera_columns:
+            camera_extra = 'prior_focal_length'
+        elif 'source' in camera_columns:
+            camera_extra = 'source'
+        else:
+            camera_extra = None
+        camera_select = 'camera_id, model, width, height, params'
+        camera_insert = 'model, width, height, params'
+        if camera_extra:
+            camera_select += f', {camera_extra}'
+            camera_insert += f', {camera_extra}'
         cameras = {
             row[0]: row for row in db.execute(
-                'SELECT camera_id, model, width, height, params, prior_focal_length FROM cameras ORDER BY camera_id'
+                f'SELECT {camera_select} FROM cameras ORDER BY camera_id'
             )
         }
+        next_camera_id = max(cameras, default=0) + 1
         report['cameras_before'] = len(cameras)
         grouped = defaultdict(list)
         rows = db.execute(
@@ -174,12 +198,29 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
             report['cut_boundaries'].extend(cut_points)
             boundaries = sorted(set([0, *cut_points, len(image_rows)]))
             segments = []
+            step = max(1, target_frames - context_frames)
             for begin, end in zip(boundaries, boundaries[1:]):
                 shot = image_rows[begin:end]
-                for offset in range(0, len(shot), target_frames):
-                    segments.append((begin, offset, shot[offset:offset + target_frames]))
-            for segment_index, (shot_begin, offset, segment) in enumerate(segments):
-                if not segment:
+                starts = list(range(0, len(shot), step))
+                centers = [start + min(target_frames, len(shot) - start) / 2.0
+                           for start in starts]
+                for window_index, offset in enumerate(starts):
+                    window_end = min(offset + target_frames, len(shot))
+                    # The window overlaps its neighbours, but ownership is
+                    # split at the midpoint of neighbouring window centres.
+                    # This keeps every image unique in the COLMAP database.
+                    owner_begin = 0 if window_index == 0 else int(
+                        (centers[window_index - 1] + centers[window_index]) / 2.0)
+                    owner_end = len(shot) if window_index == len(starts) - 1 else int(
+                        (centers[window_index] + centers[window_index + 1]) / 2.0)
+                    owner_begin = max(0, min(owner_begin, len(shot)))
+                    owner_end = max(owner_begin, min(owner_end, len(shot)))
+                    owner = shot[owner_begin:owner_end]
+                    analysis = shot[offset:window_end]
+                    segments.append((begin, offset, analysis, owner, owner_begin, owner_end))
+            for segment_index, (shot_begin, offset, analysis, segment,
+                                owner_begin, owner_end) in enumerate(segments):
+                if not segment or not analysis:
                     continue
                 original = cameras[camera_id]
                 # Leave an unused camera id at a detected cut.  The native
@@ -187,9 +228,12 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
                 # while ordinary 30-frame chunks inside one shot remain
                 # smooth and consecutive.
                 if shot_begin > 0 and offset == 0:
+                    unused_camera_id = next_camera_id
+                    next_camera_id += 1
                     db.execute(
-                        'INSERT INTO cameras (model, width, height, params, prior_focal_length) VALUES (?, ?, ?, ?, ?)',
-                        original[1:]
+                        f'INSERT INTO cameras (camera_id, {camera_insert}) VALUES '
+                        f'({", ".join("?" for _ in range(len(original)))})',
+                        (unused_camera_id, *original[1:])
                     )
                     report['cut_group_breaks'].append({
                         'source_camera_id': camera_id,
@@ -201,11 +245,13 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
                 if segment_index == 0:
                     segmented_camera_id = camera_id
                 else:
-                    cursor = db.execute(
-                        'INSERT INTO cameras (model, width, height, params, prior_focal_length) VALUES (?, ?, ?, ?, ?)',
-                        original[1:]
+                    segmented_camera_id = next_camera_id
+                    next_camera_id += 1
+                    db.execute(
+                        f'INSERT INTO cameras (camera_id, {camera_insert}) VALUES '
+                        f'({", ".join("?" for _ in range(len(original)))})',
+                        (segmented_camera_id, *original[1:])
                     )
-                    segmented_camera_id = cursor.lastrowid
                 db.executemany(
                     'UPDATE images SET camera_id = ? WHERE image_id = ?',
                     [(segmented_camera_id, row[1]) for row in segment]
@@ -217,6 +263,11 @@ def prepare_auto_focal_database(database, output, report_path=None, target_frame
                     'first_image': segment[0][2],
                     'last_image': segment[-1][2],
                     'image_count': len(segment),
+                    'analysis_first_image': analysis[0][2],
+                    'analysis_last_image': analysis[-1][2],
+                    'analysis_image_count': len(analysis),
+                    'owner_offset': owner_begin,
+                    'owner_end_offset': owner_end,
                 })
                 next_segment += 1
         db.commit()

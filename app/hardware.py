@@ -31,12 +31,22 @@ def settings_signature(options):
     if options.export_sequence:
         values['export_sequence'] = True
         values['sequence_original'] = options.sequence_original
-    if getattr(options, 'smart_lens', options.auto_focal or options.contains_cuts):
+    # Solver choice is part of the cache identity.  Continuous zoom is always
+    # the experimental segmented GLOMAP path; ordinary tasks retain the
+    # explicitly selected solver.
+    if getattr(options, 'smart_lens', False):
+        values['lens_solver'] = 'glomap_segmented'
+    else:
+        values['lens_solver'] = getattr(options, 'backend', 'glomap')
+    if getattr(options, 'smart_lens', False):
         values['auto_focal'] = True
-        values['contains_cuts'] = True
     if options.rotation_only:
         values['rotation_only'] = True
-    if options.backend in ('fastmap', 'glomap'):
+    if options.backend == 'vggt-omega':
+        from vggt_runtime import profile, UPSTREAM_REVISION
+        values.update(vggt_profile=list(profile(options.solver_quality)),
+                      vggt_revision=UPSTREAM_REVISION, color=options.color)
+    elif options.backend in ('fastmap', 'glomap'):
         values['color'] = options.color
         from solver_quality import OPTIMIZATION_REVISION
         values.update(solver_quality=options.solver_quality, optimization_revision=OPTIMIZATION_REVISION)

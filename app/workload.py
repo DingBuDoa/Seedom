@@ -33,6 +33,12 @@ def source_signature(video, options):
         size, mtime_ns = stat.st_size, stat.st_mtime_ns
     signature = {'source': str(video), 'size': size, 'mtime_ns': mtime_ns,
                  'fps': float(options.fps), 'max_size': options.max_size, 'overlap': options.overlap}
+    # Switching between the legacy GLOMAP and dynamic-focal COLMAP pipelines
+    # must invalidate a failed task's cached database and solver output.
+    signature['lens_solver'] = 'colmap_dynamic' if getattr(options, 'smart_lens', False) else 'glomap_legacy'
+    if options.backend == 'vggt-omega':
+        signature['lens_solver'] = 'vggt-omega-v1'
+        signature['vggt_quality'] = options.solver_quality
     if files is not None:
         signature.update(input_type='image_sequence', image_count=len(files))
     # Preserve legacy cache identities when processing at the original size.
@@ -65,7 +71,8 @@ def image_sequence_info(sequence):
 def video_info(video, fps):
     probe = subprocess.run([str(BINARY_DIRS['03 FFMPEG'] / 'ffprobe.exe'), '-v', 'error',
                             '-select_streams', 'v:0', '-show_entries',
-                            'stream=nb_frames,avg_frame_rate,duration,width,height,codec_name:format=duration',
+                            'stream=nb_frames,avg_frame_rate,duration,width,height,codec_name:'
+                            'stream_tags=rotate:stream_side_data=rotation:format=duration',
                             '-of', 'json', str(video)], capture_output=True, text=True, encoding='utf-8',
                            timeout=8, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
     if probe.returncode:
@@ -80,15 +87,34 @@ def video_info(video, fps):
             return 0
     duration = positive(stream.get('duration')) or positive(info.get('format', {}).get('duration'))
     count = positive(stream.get('nb_frames'))
+    width = int(positive(stream.get('width')))
+    height = int(positive(stream.get('height')))
     numerator, _, denominator = str(stream.get('avg_frame_rate', '0/1')).partition('/')
     rate = positive(numerator) / (positive(denominator) or 1)
     if not duration and count and rate:
         duration = count / rate
+    rotation = 0
+    try:
+        rotation = float(stream.get('tags', {}).get('rotate') or 0)
+    except (TypeError, ValueError):
+        rotation = 0
+    for side_data in stream.get('side_data_list', []):
+        try:
+            rotation = float(side_data.get('rotation', rotation))
+            break
+        except (TypeError, ValueError):
+            continue
+    # FFmpeg applies the display matrix while extracting frames.  Report the
+    # displayed dimensions too, otherwise portrait phone footage is treated
+    # as 16:9 and the preview canvas stays short.
+    if abs(int(round(rotation)) % 180) == 90:
+        width, height = height, width
     frames = duration * fps if fps else count or duration * rate
     if not math.isfinite(frames) or frames <= 0:
         raise ValueError('视频缺少有效帧数')
-    return {'frames': frames, 'width': stream.get('width'), 'height': stream.get('height'),
-            'codec': stream.get('codec_name'), 'fps': rate, 'duration': duration}
+    return {'frames': frames, 'width': width, 'height': height,
+            'codec': stream.get('codec_name'), 'fps': rate, 'duration': duration,
+            'rotation': rotation}
 
 
 def describe_workload(source, options, existing_scene=False, resume_scene=None):
@@ -109,9 +135,15 @@ def describe_workload(source, options, existing_scene=False, resume_scene=None):
             'matching': not ready and not (scene / '.matching-complete').exists()}
     if existing_scene:
         info = {'frames': images, 'width': None, 'height': None, 'codec': None}
+        if options.backend == 'vggt-omega':
+            info['frames'] = sum(p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
+                                 for p in (scene / 'images').iterdir())
     elif options.input_type == 'image_sequence':
         info = image_sequence_info(source)
     else:
         info = video_info(source, options.fps)
+    if options.backend == 'vggt-omega':
+        work.update(features=False, matching=False, omega=True)
+        pairs = 0
     return {**info, 'stages': work, 'existing_scene': existing_scene,
             'pairs': pairs if not work['matching'] else None}

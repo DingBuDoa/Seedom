@@ -220,6 +220,7 @@ class TaskQueue:
                         failed += 1
                         self.emit({'type': 'job', 'iid': iid, 'state': '失败'})
                         continue
+                    pipeline.defer_cache_cleanup = True
                     result = pipeline.run(path, existing_scene=scene)
                     with self.condition:
                         job['result'] = result
@@ -229,6 +230,7 @@ class TaskQueue:
                         # Timing history is optional; the completed reconstruction owns its success.
                         self.emit({'type': 'log', 'iid': iid, 'text': f'[耗时预估记录] {error}\n'})
                     blender = job.get('blender')
+                    export_ok = True
                     if blender:
                         from blender_export import export_blender
                         output = result_directory(result) / blend_filename(job['name'], blender['version'])
@@ -244,9 +246,13 @@ class TaskQueue:
                         except Cancelled:
                             raise
                         except Exception as error:
+                            export_ok = False
                             with self.condition:
                                 job['export_error'] = str(error)
                             self._diagnostic(pipeline, iid, f'[Blender 导出失败，点云已保留] {error}\n')
+                    if export_ok and isinstance(pipeline, Pipeline):
+                        from blender_sequence import clean_solver_cache
+                        clean_solver_cache(pipeline, result)
                     with self.condition:
                         job.update(state='完成', progress=5, result=result)
                     self.emit({'type': 'job', 'iid': iid, 'state': '完成', 'result': result})
